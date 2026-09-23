@@ -32,6 +32,12 @@ static const double kChordSpan = 3.5e-2;  // 整簇最大时间跨度（35ms）
 
 static const double kMinPressDuration = 5.0e-2;  // 50ms
 
+// 同键“抬起→再按下”的最小间隔：高速单键连打时，若前一次的松键贴到下一次
+// 按下（旧实现只留 1µs），游戏/输入系统可能把两次合并成一次长按而漏判。
+// 要求抬起至少 10ms（远大于一帧内的事件间隔，游戏按事件 tick 可明确区分）；
+// 间隔本身太小（< 20ms）时退化为抬起占间隔的一半。
+static const double kSameKeyReleaseGap = 1.0e-2;
+
 // 分片死循环保护：片数上限 = 事件数 × 该倍数
 static const size_t kMaxPiecesPerEvent = 64;
 
@@ -264,7 +270,11 @@ static double GetNoteFoldedPressLength(const vector<double>& evTime, int idx, do
     return (r > 1e-9) ? (30.0 / r) : 0.0;
 }
 
-// 修正同键重叠（按下前必须先松开上一次）
+// 修正同键重叠（按下前必须先松开上一次，并留出可感知的抬起间隙）。
+//
+// 高速单键连打（速度阈值调高后 fingers=1、每片一音）时，同键间隔 = 音符间隔。
+// 即抬起至少 10ms；间隔小于 20ms 时抬起占间隔的一半。
+// 间隔 ≥ 60ms 的慢速段不受影响，仍保留 50ms 下限。
 static void FixSameKeyOverlaps(vector<HitEvent>& events)
 {
     if (events.empty()) return;
@@ -272,32 +282,41 @@ static void FixSameKeyOverlaps(vector<HitEvent>& events)
     sort(events.begin(), events.end(),
         [](const HitEvent& a, const HitEvent& b) { return a.TriggerTime < b.TriggerTime; });
 
-    map<unsigned char, int> pending;
+    // key -> (该键上一次按下时刻, 对应松键事件下标)。
+    // 注意：松键事件【不】清除记录——生成阶段已把同手连打的松键钳到下一音前
+    // 1µs，松键会先于下一个按下被遍历；若松键时清除，下一个按下就找不到上一次
+    // 记录，抬起间隙限制会被跳过（旧实现的症结）。
+    map<unsigned char, pair<double, int>> lastPress;
     int n = (int)events.size();
 
     for (int i = 0; i < n; i++) {
         auto& ev = events[i];
 
-        if (ev.ReleaseOnly) {
-            if (ev.ReleaseKeyCode != 0) pending.erase(ev.ReleaseKeyCode);
-            continue;
-        }
+        if (ev.ReleaseOnly || ev.IsHoldRelated) continue;   // 松键/hold 不参与
 
         unsigned char kc = ev.KeyCode;
         if (kc == 0) continue;
 
-        auto it = pending.find(kc);
-        if (it != pending.end()) {
-            auto& relEv = events[it->second];
-            if (relEv.TriggerTime >= ev.TriggerTime)
-                relEv.TriggerTime = ev.TriggerTime - 1e-6;
-            pending.erase(it);
+        auto it = lastPress.find(kc);
+        if (it != lastPress.end()) {
+            double prevPress = it->second.first;
+            double gap = ev.TriggerTime - prevPress;      // 同键间隔
+            if (gap > 1e-9) {
+                double maxHold = gap - kSameKeyReleaseGap;  // 抬起至少 10ms
+                double halfGap = gap * 0.5;                 // 间隔太小 → 抬起占一半
+                if (maxHold < halfGap) maxHold = halfGap;
+                if (maxHold < 1e-3) maxHold = 1e-3;
+                double maxRel = prevPress + maxHold;
+                if (maxRel >= ev.TriggerTime) maxRel = ev.TriggerTime - 1e-6;
+                auto& relEv = events[it->second.second];
+                if (relEv.TriggerTime > maxRel) relEv.TriggerTime = maxRel;
+            }
         }
 
         for (int j = i + 1; j < n; j++) {
             auto& fwd = events[j];
             if (fwd.ReleaseOnly && fwd.ReleaseKeyCode == kc && !fwd.IsHoldRelated) {
-                pending[kc] = j;
+                lastPress[kc] = { ev.TriggerTime, j };
                 break;
             }
         }

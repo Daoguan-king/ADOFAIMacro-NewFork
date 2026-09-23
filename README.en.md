@@ -175,6 +175,8 @@ When enabled (requires **Key simulation**), the macro no longer simply rotates t
 
 Hold time = `max(the note's actual interval × L/R duration ratio, 50 ms)`, capped by “this slice's note span + smallest internal gap (skipping ≤12 ms gaps inside a cluster)”. Inside tight clusters it falls back to the gap outside the cluster; same-time doubles/chords share one base, and a hold is never shorter than one frame.
 
+**Same-key release gap**: before the next press of the same key a release gap is enforced — `hold ≤ max(same-key interval − 10 ms, same-key interval/2)`, i.e. at least 10 ms of release (half the interval when it is <20 ms). With a high Speed Threshold, fast single-finger streams (above ~1080 BPM) no longer leave the previous key down when the next press arrives, which the game could merge into one long press and miss; intervals ≥60 ms (slow passages) are unaffected and keep the 50 ms floor.
+
 ### Profiles
 
 Save multiple complete technique parameter sets (keys, orders, durations, starting hand, speed-change tolerance, segments); create / delete / switch from the panel.
