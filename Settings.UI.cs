@@ -336,7 +336,11 @@ namespace ADOFAIMacro
             var c = new List<object>();
 
             if (!EnableTechniqueSimulation)
+            {
                 c.Add(KeyListRow("MacroKeys", "key_settings.keys_comma_separated", MacroKeys, v => MacroKeys = v));
+                // 仅当本页确实存在按键绑定槽时才提示
+                c.Add(Text(LocalizationManager.Get("key_settings.bind_hint"), TextStyle.Secondary, WidthMax));
+            }
 
             c.Add(SwitchRow("key_settings.key_simulation", SimulateKeyPress, v =>
             {
@@ -389,7 +393,6 @@ namespace ADOFAIMacro
                 }
             }
 
-            c.Add(Text(LocalizationManager.Get("key_settings.bind_hint"), TextStyle.Secondary, WidthMax));
             return [Card(c.ToArray())];
         }
 
