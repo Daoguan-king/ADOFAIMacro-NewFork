@@ -118,6 +118,8 @@
     "tech.preset_dsjk": "DS / JK",
     "tech.preset_asdfjkl": "ASDF / JKL",
     "tech.order_format": "Order format: pipe separates key-count groups, comma separates indices (1-based). Empty = default.",
+  "tech.use_rust_trigger": "[Experimental] Use Rust trigger (TriggerRs)",
+  "tech.use_rust_trigger_hint": "The key-firing thread's trigger decisions run in a Rust DLL (TriggerRs.dll). Falls back to the built-in path if the DLL is missing or errors; key firing itself is unaffected.",
     "common.f2": "F2",
     "common.f1": "F1",
     "common.f0": "F0",

@@ -28,10 +28,18 @@ namespace ADOFAIMacro.Technique
         {
             Log("[Macro-Worker] 工作线程启动");
             timeBeginPeriod(1);
+            bool rustTrigger = false;
             try
             {
                 _startSignal.Wait();
                 if (!_workerRunning) return;
+
+                // ── Rust 触发器初始化（阶段 2：并行开关，默认关）────
+                // 开启且 DLL 加载成功 → 触发判定走 TriggerRs（Rust）；
+                // 加载失败/中途熔断 → 全程退回下方 C# 原路径（语义不变）。
+                rustTrigger = global::ADOFAIMacro.Settings.Settings.UseRustTrigger && TriggerRsHost.TryInitialize();
+                if (global::ADOFAIMacro.Settings.Settings.UseRustTrigger && !rustTrigger)
+                    Log("[Macro-Worker] Rust 触发器不可用，使用 C# 触发路径");
 
                 int localLastFloor = Volatile.Read(ref _workerLastTriggeredFloor);
                 int localResetVer = Volatile.Read(ref _resetVersion);
@@ -99,6 +107,92 @@ namespace ADOFAIMacro.Technique
 
                         bool hp = _cachedHighPrecision;
                         long qpcNow = GetRawTicks();
+
+                        // ── Rust 触发路径（阶段 2：判定走 TriggerRs，发键仍在此处）──
+                        // 与下方 C# 原路径语义逐分支等价（见 TriggerRs/src/lib.rs 注释）。
+                        // 熔断（TriggerRsHost.Available 变 false）时整循环退回 C# 路径。
+                        if (rustTrigger && TriggerRsHost.Available)
+                        {
+                            unsafe
+                            {
+                                // 事件表指针转 FFI 布局（HitEvent 与 HitEventFfi 字段一致，
+                                // 直接按引用reinterpret；C# 侧 struct 布局由锚点持有方保证）
+                                var ffiAnchor = new TriggerRsHost.Anchor
+                                {
+                                    Events = System.Runtime.InteropServices.Marshal.UnsafeAddrOfPinnedArrayElement(events, 0),
+                                    EventCount = evCount,
+                                    ResetVersion = localResetVer,
+                                    QpcSnapshot = qpcSnapshot,
+                                    // 与 C# 换算语义一致（Clock.ElapsedSec）：高精度时钟的 ticks
+                                    // 本身是 100ns（file time）单位 → freq=1e7；否则 QPC → freq=perfFrequency。
+                                    // Rust 侧 elapsed = (qpcNow - snapshot)/freq。
+                                    QpcFreq = _cachedHighPrecision ? 10_000_000L : perfFrequency,
+                                    SongPosRef = songPosRef,
+                                    Rate = rate,
+                                    TimeOffset = timeOffset,
+                                    AnchorStaleSec = AnchorStaleSec,
+                                };
+                                var wait = new TriggerRsHost.WaitAdvice();
+                                int act = TriggerRsHost.Step(ref ffiAnchor, i, qpcNow, out wait);
+
+                                switch (act)
+                                {
+                                    case TriggerRsHost.ACTION_SLEEP:
+                                        // 远 future：睡到目标前 1.5ms（>10ms 直接睡）；锚点过期同款
+                                        double rs = Math.Max(0.001, wait.SleepSec);
+                                        if (rs > 0.01) { Thread.Sleep(1); break; }
+                                        HighResSleep(Math.Max(0.0005, rs));
+                                        break;
+
+                                    case TriggerRsHost.ACTION_WAIT_AGAIN:
+                                        Thread.SpinWait(1000);
+                                        break;
+
+                                    case TriggerRsHost.ACTION_PRESS:
+                                        SendKey(events[i].KeyCode, true);
+                                        RecordFireError(-wait.DeltaSec);
+                                        localLastFloor = i++;
+                                        triggered = true;
+                                        break;
+
+                                    case TriggerRsHost.ACTION_HOLD_PRESS:
+                                        if (_isHoldDown) { SendKey(_holdKey, false); _holdKey = 0; _isHoldDown = false; }
+                                        SendKey(events[i].KeyCode, true);
+                                        _holdKey = events[i].KeyCode; _isHoldDown = true;
+                                        RecordFireError(-wait.DeltaSec);
+                                        localLastFloor = i++;
+                                        triggered = true;
+                                        break;
+
+                                    case TriggerRsHost.ACTION_RELEASE:
+                                        byte rk = events[i].IsHoldRelated
+                                            ? (events[i].ReleaseKeyCode != 0 ? events[i].ReleaseKeyCode : _holdKey)
+                                            : events[i].ReleaseKeyCode;
+                                        SendKey(rk, false);
+                                        if (events[i].IsHoldRelated) { _holdKey = 0; _isHoldDown = false; }
+                                        RecordFireError(-wait.DeltaSec);
+                                        localLastFloor = i++;
+                                        triggered = true;
+                                        break;
+
+                                    case TriggerRsHost.ACTION_FINISHED:
+                                        if (_isKeyDown) WorkerReleaseKey();
+                                        if (_isHoldDown) WorkerReleaseHoldKey();
+                                        goto WriteBack;
+
+                                    case TriggerRsHost.ACTION_NONE:
+                                    default:
+                                        // 版本吸收轮 / 熔断中：退回 C# 判定（下一分支），
+                                        // 不 break 出循环——保持语义最小扰动
+                                        break;
+                                }
+
+                                if (act != TriggerRsHost.ACTION_NONE)
+                                    continue;
+                                // act == NONE：fall through 到 C# 原路径（版本吸收轮只发生一次）
+                            }
+                        }
+
                         double elapsed = (double)(qpcNow - qpcSnapshot) * (hp ? 1e-7 : perfFreqInv);
 
                         // 锚点过期保护：Update 每帧刷新锚点（正常 elapsed 远小于一帧）。若主线程
@@ -229,6 +323,7 @@ namespace ADOFAIMacro.Technique
             finally
             {
                 timeEndPeriod(1);
+                if (rustTrigger) TriggerRsHost.Shutdown();
                 if (Main.Settings.EnableTechniqueSimulation)
                 { if (_isHoldDown) SendKey(_holdKey, false); }
                 else

@@ -580,6 +580,19 @@ namespace ADOFAIMacro.Settings
         }
 #endif
 
+        // ── Rust 触发器（TriggerRs，默认关）────────────────
+        // 开启后发键线程的触发判定（锚点外推/等待决策）走 TriggerRs Rust DLL，
+        // 发键本身仍在 C#（DirectPushKey 依赖 Unity 托管事件）。
+        // DLL 缺失/连续异常时自动回退 C# 路径（见 TriggerRsHost）。
+        // Release 版同样可开（TriggerRs 与 TechniqueSimulator 互不替代：
+        // 一个管"何时发"，一个管"发什么"）。
+        private static bool _useRustTrigger;
+        public static bool UseRustTrigger
+        {
+            get => _useRustTrigger;
+            set { if (_useRustTrigger == value) return; _useRustTrigger = value; }
+        }
+
         // ── 关卡特定手法配置 ─────────────────────────────
         private static bool _levelConfigAutoLoad = true;
         public bool LevelConfigAutoLoad
@@ -1383,6 +1396,15 @@ namespace ADOFAIMacro.Settings
             GUIStyle tipStyle = UIUtils.LabelStyleVariant(0.7f, 0.7f, 0.7f, 0.8f, 10, wordWrap: true);
             GUILayout.Label(LocalizationManager.Get("tech.bpm_explanation"), tipStyle);
             GUILayout.Space(10);
+
+            // ── Rust 触发器（阶段 2：并行开关，默认关）────────────
+            // DLL 缺失/熔断时自动回退 C# 路径（见 TriggerRsHost），开关不强制改写。
+            bool newRust = UIUtils.M3Switch(Settings.UseRustTrigger,
+                LocalizationManager.Get("tech.use_rust_trigger"));
+            if (newRust != Settings.UseRustTrigger) Settings.UseRustTrigger = newRust;
+            GUILayout.Label(LocalizationManager.Get("tech.use_rust_trigger_hint"), tipStyle);
+            GUILayout.Space(6);
+
             GUILayout.Label(LocalizationManager.Get("tech.player_title"), UIUtils.LabelStyle);
             GUILayout.Space(2);
 

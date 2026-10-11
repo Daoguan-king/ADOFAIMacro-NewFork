@@ -79,6 +79,7 @@
     <Compile Include="Technique\NativeTechnique.cs" />
     <Compile Include="Technique\PieceBuilder.cs" />
     <Compile Include="Technique\KeyWorker.cs" />
+    <Compile Include="Technique\TriggerRsHost.cs" />
     <Compile Include="Technique\Clock.cs" />
     <Compile Include="Technique\Lifecycle.cs" />
     <Compile Include="Technique\TechniqueSimulator.cs" />
