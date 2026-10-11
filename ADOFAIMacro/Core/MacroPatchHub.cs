@@ -407,13 +407,22 @@ namespace ADOFAIMacro.Core
         // 与 Spectre 的共享 finalizer 等价且不需要 Harmony finalizer 语义。
         private static readonly Dictionary<MethodInfo, MethodInfo> _guardCache = new();
 
+        // 工厂方法引用（GuardFactory.BuildGuardMethod 的 MethodInfo，反射缓存一次）
+        private static readonly MethodInfo _factoryMethod =
+            typeof(GuardFactory).GetMethod(nameof(GuardFactory.BuildGuardMethod),
+                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
         private static MethodInfo WrapWithGuard(Spec spec)
         {
             if (_guardCache.TryGetValue(spec.PatchMethod, out var cached)) return cached;
-            var wrapped = GuardFactory.BuildGuard(spec.PatchMethod, spec.Id, spec.Attr.DisableAfterExceptions,
+            // ★ 不把 guard DynamicMethod 直接给 HarmonyMethod（2.3.6 拒绝，见 GuardFactory 类注释）。
+            // 正确形态：把「补丁工厂」BuildGuardMethod 交给 HarmonyMethod，并先用 BeginFactory
+            // 登记本次上下文；Harmony 挂载时调 BuildGuardMethod(original) → 内部生成 guard
+            // → 取其返回值当补丁方法。
+            GuardFactory.BeginFactory(spec.PatchMethod, spec.Id, spec.Attr.DisableAfterExceptions,
                 (id, ex, targetName) => RecordGuardException(spec, targetName, ex, id));
-            _guardCache[spec.PatchMethod] = wrapped;
-            return wrapped;
+            _guardCache[spec.PatchMethod] = _factoryMethod;
+            return _factoryMethod;
         }
 
         private static void RecordGuardException(Spec spec, string targetName, Exception ex, string specId)
