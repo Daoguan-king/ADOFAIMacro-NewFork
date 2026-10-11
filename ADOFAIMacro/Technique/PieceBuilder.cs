@@ -151,6 +151,57 @@ namespace ADOFAIMacro.Technique
             return -1;
         }
 
+        // ── 【2026-10-11 与 C++ TimeSlicePartition 同步】──────────────
+        //  以下三个成员与原生 TechniqueSimulator.cpp 的 BuildRestartMarks/
+        //  RestartMark/markAt/adviceBpm 一一对应。C# 回退路径此前没有
+        //  「变速点重启」机制（只重看分段配置），变速谱面会一片吃穿变速点；
+        //  现按原生语义重建：建议 BPM 变化处 = 变速点 = 重开时间片。
+        //
+        //  原生 BuildRestartMarks 的三个要点照抄：
+        //  · 索引 0 永远是一个 mark（kind=1 指定主副手）；
+        //  · 建议 BPM 未变（差 ≤1e-9）不算变速点；
+        //  · 变速点 mark 的手性乘数恒为 1（"*1" ⇒ hand 不变），
+        //    且 adviceBpm 恒 >0 ⇒ restart 时走「绝对赋值」分支，
+        //    乘法分支（adviceBpm<0）在本移植的 mark 生成规则下不可达，
+        //    故 C# 只实现绝对分支。
+        private struct RestartMark { public int Idx; public int Kind; public int Hand; }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void BuildRestartMarks(
+            List<double> evTime, List<int> evFloor, List<double> evSpeed,
+            bool hasSpeed, double speedFallback,
+            double bpm, double bpmLimit, int mainHand,
+            List<RestartMark> marks, int[] markAt, double[] adviceBpm)
+        {
+            int n = evTime.Count;
+            marks.Clear();
+            for (int i = 0; i < n; i++) { markAt[i] = -1; adviceBpm[i] = 0.0; }
+            if (n <= 0) return;
+
+            for (int i = 0; i < n; i++)
+            {
+                double s = (hasSpeed && i < evSpeed.Count) ? evSpeed[i] : speedFallback;
+                if (!(s > 1e-9)) s = (speedFallback > 1e-9) ? speedFallback : 1.0;
+                adviceBpm[i] = GetAdviceBpm(bpmLimit, s);
+            }
+
+            // 第 1 行：索引 0，永远重开 + 指定主副手（原生 :313-314）
+            marks.Add(new RestartMark { Idx = 0, Kind = 1, Hand = mainHand });
+            markAt[0] = 0;
+
+            // 变速点判定：建议 BPM 变化处（原生 :331-340）。
+            // 手性乘数恒 1（kind=2）⇒ hand *= 1 ⇒ 手性不变。
+            for (int i = 1; i < n; i++)
+            {
+                if (Math.Abs(adviceBpm[i] - adviceBpm[i - 1]) <= 1e-9) continue;
+                marks.Add(new RestartMark { Idx = i, Kind = 2, Hand = 1 });
+                markAt[i] = marks.Count - 1;
+            }
+        }
+
+        // 片界守卫窗口（一帧 ≈ 16.7ms），与原生 kBoundaryGuardSec 相同
+        private const double BoundaryGuardSec = 0.0167;
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void BuildPieces(
             List<double> evTime, List<int> evPress, List<int> evFloor,
@@ -175,57 +226,97 @@ namespace ADOFAIMacro.Technique
             //  deadZone + lockedRate 保持，以及底部的"自适应时间片延伸"
             //  （几何修补），已随原生 TechniqueSimulator.cpp 一并删除。
             //  理由与实测数据见 TechniqueSimulator.cpp 内同名注释块。
-            double lockedRate = ADOBase.controller?.playerOne?.planetarySystem?.speed ?? 1.0;
-            if (evSpeed != null && evSpeed.Count > 0 && evSpeed[0] > 1e-9) lockedRate = evSpeed[0];
+            //
+            // ── 【2026-10-11 与 C++ TimeSlicePartition 同步】────────
+            //  片长模型从「逐片跟随本片速度 + 分段切换重置」整体改为原生的
+            //  「变速点重启（RestartMark）驱动」：
+            //    · nowBpm 只在 restart 时按绝对 bpm 重设（C++ :416），
+            //      片与片之间保持不变（mult 除外）；
+            //    · 变速点 = 建议 BPM 变化处（由 BuildRestartMarks 预先算好）；
+            //    · restart 时：mult=0、级联计数器清零、nowT 跳到该事件、
+            //      上一片终止时刻对齐、canMulti=0（C++ :405-426）；
+            //    · 窗口计数在变速点处断开（C++ :450-453）。
+            //  旧的「逐片跟随本片速度」是 10-04 重构前单趟贪心的遗留，
+            //  与原生行为不符；「段切换重置」在原生里也不存在 ——
+            //  分段配置只影响 ResolveConfig 等价的键表/上限查找，
+            //  不触发任何算法状态重置。回退路径现已与两条原生路径
+            //  （在线贪心 / 离线求解）共享同一套分片语义。
+            double speedFallback = ADOBase.controller?.playerOne?.planetarySystem?.speed ?? 1.0;
+            bool hasSpeed = evSpeed != null && evSpeed.Count > 0;
 
-            float  lastSegLimit = GetSegmentBpmLimit(evFloor[0]);
-            double nowBpm       = GetAdviceBpm(lastSegLimit, lockedRate);
-            int    lastSegIdx   = FindSegmentIndex(evFloor[0]);
+            // 初始 bpmLimit：取第一个事件所属分段（C++ :369-375）
+            double limit0 = Main.Settings.TechniqueBpmLimit;
+            if (_currentSegments is { Count: > 0 })
+            {
+                int s0 = FindSegmentIndex(evFloor[0]);
+                if (s0 >= 0) limit0 = _currentSegments[s0].bpmLimit;
+            }
+
+            var marks = new List<RestartMark>();
+            var markAt = new int[total];
+            var adviceBpm = new double[total];
+            BuildRestartMarks(evTime, evFloor, evSpeed ?? [], hasSpeed,
+                              speedFallback, (double)conductor!.bpm, limit0,
+                              (_levelTechHandPref == 0) ? -1 : 1, marks, markAt, adviceBpm);
+
+            double nowBpm = adviceBpm.Length > 0 ? adviceBpm[0] : 500.0;
+            if (nowBpm <= 0.0) nowBpm = 500.0;
 
             while (nowD < total)
             {
 int psize = pieces.Count;   // 本片提交前的片数
-                int   curFloorIdx = evFloor[nowD];
-                int   curSegIdx   = FindSegmentIndex(curFloorIdx);
-                float curSegLimit = GetSegmentBpmLimit(curFloorIdx);
 
-                if (curSegIdx != lastSegIdx)
+                // ── 变速点：重开时间片（C++ :403-426）────────────
+                if (markAt[nowD] >= 0)
                 {
-                    cHand   = (_levelTechHandPref == 0) ? -1 : 1;
-                    mult    = 0;
+                    RestartMark m = marks[markAt[nowD]];
+                    mult = 0;
                     Array.Clear(mCnt,    0, mCnt.Length);
                     Array.Clear(mCntPre, 0, mCntPre.Length);
-                    canMulti  = 0;
-                    needBack  = false;
-                    lastSegLimit = curSegLimit;
-                    // 段切换：片长先回到本段基准速度
-                    lockedRate = ADOBase.controller?.playerOne?.planetarySystem?.speed ?? 1.0;
-                    nowBpm       = GetAdviceBpm(lastSegLimit, lockedRate);
-                    lastSegIdx   = curSegIdx;
+                    if (m.Kind == 1) cHand = m.Hand;
+                    else             cHand *= m.Hand;
+                    nowT = evTime[nowD];
+                    if (adviceBpm[nowD] > 0.0) nowBpm = adviceBpm[nowD];
+                    else                       nowBpm *= -1.0 * adviceBpm[nowD];
+                    // 原生 restart 后自清标记（C++ :418-422）：
+                    // nowT 已对齐 evTime[nowD]，差值恒 0，不自清会永久自旋。
+                    markAt[nowD] = -1;
+                    if (pieces.Count > 0)
+                    {
+                        var last = pieces[pieces.Count - 1];
+                        pieces[pieces.Count - 1] = new PieceInfo(last.EvCount, last.Hand,
+                            last.PieceLen, last.StartTime, nowT, last.EvStart, last.Multiplier);
+                    }
+                    canMulti = 0;
+                    needBack = false;
+                    continue;
                 }
 
-                // ── 逐片跟随本片速度 ──────────────────────────────
-                // 与原生 TechniqueSimulator.cpp 一致：每片重看本片所属地板的速度。
-                // 注意此处的索引语义：原生用事件索引 si=nowD 查 speedMuls，
-                // 而 evSpeed 是按**地板**下标建的，这里沿用 curFloorIdx 取值
-                // （C# 回退路径仅 DEBUG 可用，行为差异不在本次改动范围内）。
-                if (evSpeed != null && evSpeed.Count > 0)
-                {
-                    if (curFloorIdx < evSpeed.Count && evSpeed[curFloorIdx] > 1e-9)
-                        lockedRate = evSpeed[curFloorIdx];
-                    nowBpm = GetAdviceBpm(lastSegLimit, lockedRate);
-                }
-
-                if (pieces.Count > total * 64) break;
-
+                // ── 片长（C++ :429）────────────────────────────
                 double pLen = 60.0 / (nowBpm * Math.Pow(2, mult)) / 2.0;
 // 与 cpp 的 kMaxMult=60 对齐：mult 本身无上限，而 mCnt 是
                 // long[16]，越界即 UB；60 级已远超任何真实谱面。
                 if (mult > 60) mult = 60;
                 if (pLen < 1e-9) pLen = 1e-9;
 
-                int cnt   = CountEventsInRange(evTime, nowD, nowT + pLen * 0.995);
-                int csH   = (cHand == 1) ? 1 : 0;
+                if (pieces.Count > total * 64 + 4096) break;   // 防死循环兜底（C++ pieceCap）
+
+                // ── 本片可纳入事件数（C++ :446-455）────────────
+                // 窗口系数 0.995；遇变速点立即断开。
+                int cnt = 0;
+                {
+                    double w = nowT + pLen * 0.995;
+                    int j = nowD;
+                    while (j < total && evTime[j] < w)
+                    {
+                        if (markAt[j] >= 0) break;
+                        j++;
+                    }
+                    cnt = j - nowD;
+                }
+
+                int   curFloorIdx = evFloor[nowD];
+                int   csH   = (cHand == 1) ? 1 : 0;
 
                 // 使用分段有效配置来确定当前手的最大按键数
                 var   ec   = GetEffectiveConfig(curFloorIdx);
@@ -243,7 +334,6 @@ int psize = pieces.Count;   // 本片提交前的片数
                 {
                     if (canMulti == 1 && isOffHand) needBack = true;
                     mult++;
-                    mCnt[mult] = 0;
                     continue;
                 }
 
@@ -292,6 +382,13 @@ int psize = pieces.Count;   // 本片提交前的片数
                 // 故 Add 的顺序不影响当轮判定。
                 slotHand.Add(csH);
 
+// 【2026-10-11 同步 C++ :514】提交片前快照级联计数器。
+// 此前 C# 从未做过这次复制（mCntPre 只在段切换时被清零），
+// 回溯时 Array.Copy(mCntPre, mCnt) 恢复的是零/过期数组 —— 回溯后
+// 的倍乘节拍与原生完全不同。现在与原生一致：mCntPre = 上一片
+// 提交前的 mCnt，回溯用它恢复。
+                Array.Copy(mCnt, mCntPre, 64);
+
 // 全层级（long[16] 数组被 for(c=0;c<32) 越界写，属 UB；cpp 已修成全 64 级）
                 for (int c = mult; c > 0; c--)
                 {
@@ -307,6 +404,57 @@ int psize = pieces.Count;   // 本片提交前的片数
 
                 if (nowD < total && Math.Abs(evTime[nowD] - nowT) < pLen * 0.01)
                 nowT = evTime[nowD];
+            }
+
+            // ── 片界防伪双押后处理（2026-10-11 与 C++ :588-645 同步）────
+            // 放在分片循环之后、追加哨兵片之前（哨兵由调用方追加）。
+            //
+            // 【为什么是后处理，而不是在分片循环里 cnt++】（照抄原生注释）
+            // 第一版把吞并写在循环里（cnt++ 后再提交），结果撞出**相位漂移**：
+            // 手性靠 if (cnt > 0) hand = -hand 累积，被吞的那片一旦变空就不再翻手，
+            // 于是后续每片手性按奇偶整体对调。这里改为：分片循环照常跑完
+            //（片边界、mult、nowT 与基线逐项相同），再把「跨手片界上、
+            // 间隔 < 一帧」的音从下一片**搬**到上一片。每片的 hand 是显式存进
+            // PieceInfo 的（不是运行期奇偶），搬音不改变任何一片的 hand ⇒ 相位零漂移。
+            //
+            // 约束（与原生一致）：
+            //   ① 只处理跨手片界（同手界不是伪双押）；
+            //   ② 搬后本片音数不得超过该手键数上限（超过会退化成同键重叠）；
+            //   ③ 遇变速点不搬（BPM 层级切换语义必须保留）；
+            //   ④ 不许把下一片掏空，且必须保住它的多音性（`> 2`）——
+            //     掏空会让它变成空片（空片也翻手 ⇒ 后续片与更后面片同手）；
+            //     只保 ≥1 音还不够：下一片 2 音被搬走 1 音就掉成 1 音，
+            //     oi = min(evCount-1, keyCount-1) 从 1 掉到 0，order 表掉行，
+            //     该片的重音样式（强弱拍）被削。`> 2` ⇒ 行数不掉 ⇒ 强弱拍保住。
+            //  实测（原生，ofnr 谱）：多音段 3389→3552（连守卫关的 3406 都超过），
+            //  跨手同帧 564→679（守卫关 859）。三谱全面不劣。
+            for (int i = 0; i + 1 < pieces.Count; i++)
+            {
+                if (pieces[i].Hand == pieces[i + 1].Hand) continue;
+                if (pieces[i].EvCount <= 0 || pieces[i + 1].EvCount <= 0) continue;
+
+                int maxK;
+                {
+                    var ec = GetEffectiveConfig(evFloor[pieces[i].EvStart]);
+                    maxK = (pieces[i].Hand == 0) ? ec.LeftKeys.Length : ec.RightKeys.Length;
+                }
+                if (maxK <= 0) continue;
+
+                while (pieces[i].EvCount < maxK && pieces[i + 1].EvCount > 2)
+                {
+                    int lastIdx = pieces[i].EvStart + pieces[i].EvCount - 1;
+                    int nextIdx = pieces[i + 1].EvStart;
+                    if (nextIdx != lastIdx + 1) break;              // 非相邻（防御）
+                    double gap = evTime[nextIdx] - evTime[lastIdx];
+                    if (!(gap > 1e-9) || gap >= BoundaryGuardSec) break;
+                    if (markAt[nextIdx] >= 0) break;                // 变速点不搬
+                    pieces[i] = new PieceInfo(pieces[i].EvCount + 1, pieces[i].Hand,
+                        pieces[i].PieceLen, pieces[i].StartTime, pieces[i].EndTime,
+                        pieces[i].EvStart, pieces[i].Multiplier);
+                    pieces[i + 1] = new PieceInfo(pieces[i + 1].EvCount - 1, pieces[i + 1].Hand,
+                        pieces[i + 1].PieceLen, pieces[i + 1].StartTime, pieces[i + 1].EndTime,
+                        pieces[i + 1].EvStart + 1, pieces[i + 1].Multiplier);
+                }
             }
         }
 
