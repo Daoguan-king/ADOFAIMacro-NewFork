@@ -80,6 +80,7 @@
     <Compile Include="Technique\PieceBuilder.cs" />
     <Compile Include="Technique\KeyWorker.cs" />
     <Compile Include="Technique\TriggerRsHost.cs" />
+    <Compile Include="Technique\EmbeddedNative.cs" />
     <Compile Include="Technique\Clock.cs" />
     <Compile Include="Technique\Lifecycle.cs" />
     <Compile Include="Technique\TechniqueSimulator.cs" />
@@ -263,14 +264,47 @@
     <Content Include="Localization\en-US.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!--
+      Rust 触发内核（TriggerRs）以嵌入资源随主 DLL 分发：
+      部署面保持「一个 ADOFAIMacro.dll」，运行期由 EmbeddedNative 解压到
+      %LOCALAPPDATA%\ADOFAIMacro\native\ 再 LoadLibrary（详见 EmbeddedNative.cs）。
+      资源文件 = TriggerRs target release 下的 macro_trigger.dll（cargo build 产物）。
+      构建前先跑 TriggerRs（见下方 BuildTriggerRs Target）。
+    -->
+    <EmbeddedResource Include="$(RepoRoot)TriggerRs\target\release\macro_trigger.dll">
+      <LogicalName>ADOFAIMacro.Technique.macro_trigger.dll</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
-  <!--
+    <!--
     把原生 TechniqueSimulator.dll / InputSystem.dll 收集到统一输出目录。
     C++ 项目在仓库根的 TechniqueSimulator\ 与 InputSystem\ 下（与托管项目
     分开，因为 vcxproj 不能放进 SDK 项目的目录树里）。
     打包目录 out\<Cfg>\ 是部署布局的单一来源。
   -->
+  <Target Name="BuildTriggerRs" BeforeTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <!--
+      构建 Rust 触发内核（TriggerRs → macro_trigger.dll）。
+      仅 Release 构建（Debug 用 C# 触发路径，减少调试变量）；
+      cargo 缺失时跳过并告警——嵌入资源缺失时 TriggerRsHost 会退回 C# 路径，不阻塞构建。
+      镜像环境变量（RUSTUP_HOME/CARGO_HOME）沿用用户级持久变量（D:\Rust）。
+    -->
+    <PropertyGroup>
+      <_CargoExe>D:\Rust\.cargo\bin\cargo.exe</_CargoExe>
+      <_TriggerRsDir>$(RepoRoot)TriggerRs</_TriggerRsDir>
+      <_TriggerDll>$(_TriggerRsDir)\target\release\macro_trigger.dll</_TriggerDll>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(_CargoExe)') And !Exists('$(_TriggerDll)')"
+           Text="TriggerRs: 未找到 cargo（D:\Rust\.cargo\bin\cargo.exe）且无预编译 macro_trigger.dll，请安装 Rust 或手动放置 DLL" />
+    <Exec Condition="Exists('$(_CargoExe)')"
+          Command="$(_CargoExe) build --release"
+          WorkingDirectory="$(_TriggerRsDir)"
+          EnvironmentVariables="RUSTUP_HOME=D:\Rust\.rustup;CARGO_HOME=D:\Rust\.cargo"
+          IgnoreExitCode="false" />
+    <Message Condition="!Exists('$(_CargoExe)') And Exists('$(_TriggerDll)')"
+             Importance="normal" Text="TriggerRs: cargo 不可用，使用既有预编译 macro_trigger.dll" />
+  </Target>
+
   <Target Name="CopyNativeDlls" AfterTargets="Build">
     <PropertyGroup>
       <_TechSimDll>$(RepoRoot)TechniqueSimulator\x64\$(Configuration)\TechniqueSimulator.dll</_TechSimDll>

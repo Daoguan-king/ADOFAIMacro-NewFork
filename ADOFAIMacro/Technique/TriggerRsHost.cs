@@ -113,12 +113,18 @@ namespace ADOFAIMacro.Technique
             if (_session != IntPtr.Zero) { StepFree(_session); _session = IntPtr.Zero; }
             try
             {
-                // DllImport("macro_trigger") 走默认 probing（游戏 exe 目录 → PATH），
-                // Mods 目录不在其中——先 SetDllDirectory 指到 Mods\ADOFAIMacro，
-                // 让 macro_trigger.dll 与 TechniqueSimulator.dll 同目录部署。
-                string modPath = Main.Mod?.Path;
-                if (!string.IsNullOrEmpty(modPath) && System.IO.Directory.Exists(modPath))
-                    SetDllDirectory(modPath);
+                // 嵌入式加载：macro_trigger.dll 内嵌在 ADOFAIMacro.dll 资源里，
+                // 首次使用时解压到 %LOCALAPPDATA%\ADOFAIMacro\native\ 再 LoadLibrary
+                //（Windows 加载器语义：同名校验过模块后，后续 DllImport("macro_trigger")
+                //  直接复用已加载模块，不再走文件系统 probing）。
+                // 若嵌入资源缺失（旧版主 DLL），退回 Mods 目录探测（SetDllDirectory）。
+                IntPtr h = EmbeddedNative.LoadEmbedded();
+                if (h == IntPtr.Zero)
+                {
+                    string modPath = Main.Mod?.Path;
+                    if (!string.IsNullOrEmpty(modPath) && System.IO.Directory.Exists(modPath))
+                        SetDllDirectory(modPath);
+                }
 
                 _session = StepCreate();
                 _available = _session != IntPtr.Zero;
