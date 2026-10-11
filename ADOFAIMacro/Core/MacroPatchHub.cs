@@ -352,8 +352,17 @@ namespace ADOFAIMacro.Core
             try
             {
                 Harmony harmony = Main.Harmony!;
-                MethodInfo patchMethod = spec.TryingCatch
-                    ? WrapWithGuard(spec) : spec.PatchMethod;
+                // ★ TryingCatch 防护层的实现史（2026-10-12）：
+                //   ① 首版 Reflection.Emit 生成 DynamicMethod 直挂 → .NET 桌面验证通过，
+                //     实机（Unity Mono）报「Cannot directly reference dynamic method」13/13；
+                //   ② 改「补丁工厂」形态 → 实机报「Custom attributes on a ParamInfo with
+                //     member DynamicMethod are not supported」11/13（Mono 不支持对
+                //     DynamicMethod 参数取特性；无参补丁 2 个幸存印证了根因）。
+                //   → 结论：Mono 运行时对 DynamicMethod 的反射面太窄，DynamicMethod
+                //     路线在本项目（Unity Mono 宿主）不可行。改为【零代码生成】方案：
+                //     防护内联到每个补丁方法体自己的 try/catch（见 Patches.ReportToHub），
+                //     TryingCatch 只作声明语义保留，挂载期不再做任何包装。
+                MethodInfo patchMethod = spec.PatchMethod;
                 HarmonyMethod patch = new(patchMethod);
                 int done = 0;
                 List<string> failures = null;
@@ -400,35 +409,36 @@ namespace ADOFAIMacro.Core
             }
         }
 
-        // —— 异常兜底（包装 + 限流 + 自动卸载）—————————————————
-
-        // TryingCatch = true 时把补丁方法包一层 try/catch（闭包捕获 specId/目标名/阈值）。
-        // 每个补丁生成一个独立包装（字典缓存防重复包装），无异常时只有一次 try 进出，
-        // 与 Spectre 的共享 finalizer 等价且不需要 Harmony finalizer 语义。
-        private static readonly Dictionary<MethodInfo, MethodInfo> _guardCache = new();
-
-        // 工厂方法引用（GuardFactory.BuildGuardMethod 的 MethodInfo，反射缓存一次）
-        private static readonly MethodInfo _factoryMethod =
-            typeof(GuardFactory).GetMethod(nameof(GuardFactory.BuildGuardMethod),
-                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-
-        private static MethodInfo WrapWithGuard(Spec spec)
-        {
-            if (_guardCache.TryGetValue(spec.PatchMethod, out var cached)) return cached;
-            // ★ 不把 guard DynamicMethod 直接给 HarmonyMethod（2.3.6 拒绝，见 GuardFactory 类注释）。
-            // 正确形态：把「补丁工厂」BuildGuardMethod 交给 HarmonyMethod，并先用 BeginFactory
-            // 登记本次上下文；Harmony 挂载时调 BuildGuardMethod(original) → 内部生成 guard
-            // → 取其返回值当补丁方法。
-            GuardFactory.BeginFactory(spec.PatchMethod, spec.Id, spec.Attr.DisableAfterExceptions,
-                (id, ex, targetName) => RecordGuardException(spec, targetName, ex, id));
-            _guardCache[spec.PatchMethod] = _factoryMethod;
-            return _factoryMethod;
-        }
-
-        private static void RecordGuardException(Spec spec, string targetName, Exception ex, string specId)
+        // —— 异常兜底（历史 + 现状）———————————————————————————
+        //
+        // TryingCatch 属性语义保留，但实现改为【补丁方法体内联 catch】：
+        //   2026-10-12 实证 Unity Mono 运行时对 DynamicMethod 的反射面太窄——
+        //   ①DirectMethod 直挂被拒（「Cannot directly reference dynamic method」）；
+        //   ②改补丁工厂后对 DynamicMethod 参数取特性仍被拒（「Custom attributes on
+        //   a ParamInfo with member DynamicMethod are not supported」，Mono 专属，
+        //   .NET Framework 桌面验证通过也测不出来）。无参补丁恰好幸存 2 个印证根因。
+        //   → DynamicMethod 防护路线整体废弃（GuardFactory 保留代码留作 .NET 宿主参考，
+        //     但不再被 Hub 调用），防护语义由每个补丁方法体的内联 try/catch 承担。
+        // 仍生效的兜底设施：_guardStats 30s 窗口限流 + DisableAfterExceptions 自动卸载，
+        // 入口是 Hub.NoteGuardException（由内联 catch 调用）。
+        /// <summary>
+        /// 内联 catch 的统一上报口：30s 窗口限流 + DisableAfterExceptions 自动卸载。
+        /// 由各补丁方法体的 catch 调用；绝不允许向外抛。
+        /// </summary>
+        internal static void NoteGuardException(string specId, string patchClassName, string patchMethodName,
+            string targetName, Exception ex)
         {
             try
             {
+                // 反查 spec（按 Id 前缀；挂载期已建好，运行期只读）
+                Spec spec = null;
+                lock (_lock)
+                {
+                    string prefix = "MacroPatch:" + patchClassName + "." + patchMethodName;
+                    spec = _specs.FirstOrDefault(s => s.Id.StartsWith(prefix, StringComparison.Ordinal));
+                }
+                if (spec == null) return;
+
                 string key = specId + "@" + targetName;
                 string sig = ex.GetType().Name + ": " + ex.Message;
                 DateTime nowUtc = DateTime.UtcNow;

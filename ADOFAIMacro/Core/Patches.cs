@@ -94,6 +94,23 @@ namespace ADOFAIMacro.Core
             _guardLastMs.Clear();
         }
 
+        // ── 【2026-10-12 MacroPatch 第二层防护 · 内联 catch 上报口】──
+        // 历史：MacroPatchHub 原计划用 Reflection.Emit 生成 try/catch 包装（TryingCatch），
+        // 但 Unity Mono 运行时对 DynamicMethod 的反射面太窄，两层实现（直挂/补丁工厂）
+        // 都在实机被拒——详见 MacroPatchHub「异常兜底」注释块。
+        // 现方案：防护内联在补丁方法体自身（本文件各 Patch_* 方法的外层 try/catch），
+        // catch 里调 ReportToHub 上报 → Hub 的 30s 窗口限流 + DisableAfterExceptions 自动卸载。
+        // ★ 上报自身绝不允许抛（否则防护变凶器）。
+        private static void ReportToHub(string patchMethodName, string targetName, Exception ex)
+        {
+            try
+            {
+                MacroPatchHub.NoteGuardException("MacroPatch:Patches." + patchMethodName,
+                    nameof(Patches), patchMethodName, targetName, ex);
+            }
+            catch { /* 上报失败就放弃，绝不抛回游戏 */ }
+        }
+
         private static scrController CachedController
         {
             get
@@ -121,37 +138,49 @@ namespace ADOFAIMacro.Core
             MethodNames = new[] { "PlayerControl_Update" })]
         public static void Patch_PlayerControl_Update_Prefix(scrController __instance)
         {
-            Guarded("PlayerControl_Update", () => MacroEngine.Update(__instance));
+            try
+            {
+                Guarded("PlayerControl_Update", () => MacroEngine.Update(__instance));
+            }
+            catch (Exception ex) { ReportToHub(nameof(Patch_PlayerControl_Update_Prefix), "scrController.PlayerControl_Update", ex); }
         }
 
         [MacroPatch(typeof(scrController), nameof(scrController.Awake_Rewind), PatchType.Postfix)]
         public static void Patch_Awake_Rewind_Postfix(scrController __instance)
         {
-            Guarded("Awake_Rewind", () =>
+            try
             {
-                MacroEngine.Reset(__instance);
-                // 关卡重置时，尝试加载关卡特定配置
-                if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation && Main.Settings.LevelConfigAutoLoad)
+                Guarded("Awake_Rewind", () =>
                 {
-                    LevelTechniqueManager.ResetCheckState();
-                    LevelTechniqueManager.CheckAndLoadLevelConfig();
-                }
-            });
+                    MacroEngine.Reset(__instance);
+                    // 关卡重置时，尝试加载关卡特定配置
+                    if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation && Main.Settings.LevelConfigAutoLoad)
+                    {
+                        LevelTechniqueManager.ResetCheckState();
+                        LevelTechniqueManager.CheckAndLoadLevelConfig();
+                    }
+                });
+            }
+            catch (Exception ex) { ReportToHub(nameof(Patch_Awake_Rewind_Postfix), "scrController.Awake_Rewind", ex); }
         }
 
         [MacroPatch(typeof(scrController), nameof(scrController.Restart), PatchType.Prefix)]
         public static void Patch_Restart_Prefix(scrController __instance)
         {
-            Guarded("Restart", () =>
+            try
             {
-                MacroEngine.Reset(__instance);
-                // 关卡重启时，尝试加载关卡特定配置
-                if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation && Main.Settings.LevelConfigAutoLoad)
+                Guarded("Restart", () =>
                 {
-                    LevelTechniqueManager.ResetCheckState();
-                    LevelTechniqueManager.CheckAndLoadLevelConfig();
-                }
-            });
+                    MacroEngine.Reset(__instance);
+                    // 关卡重启时，尝试加载关卡特定配置
+                    if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation && Main.Settings.LevelConfigAutoLoad)
+                    {
+                        LevelTechniqueManager.ResetCheckState();
+                        LevelTechniqueManager.CheckAndLoadLevelConfig();
+                    }
+                });
+            }
+            catch (Exception ex) { ReportToHub(nameof(Patch_Restart_Prefix), "scrController.Restart", ex); }
         }
 
         // 关卡加载完成时也检测一次
@@ -159,31 +188,39 @@ namespace ADOFAIMacro.Core
             ParameterTypes = new[] { typeof(bool), typeof(string) })]
         public static void Patch_scnGame_LoadAndPlayLevel_Postfix(bool __result, string levelPath)
         {
-            if (!__result) return;
-
-            if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation && Main.Settings.LevelConfigAutoLoad)
+            try
             {
-                LevelTechniqueManager.ResetCheckState();
-                LevelTechniqueManager.CheckAndLoadLevelConfig();
-            }
+                if (!__result) return;
 
-            // 轨迹播放器：加载期预热（21:20 前的功能，回退时被误删，已恢复）。
-            // 此刻（scnGame.LoadAndPlayLevel 尾部）整首谱的地板与每块砖的
-            // entryTime 都已经算好（MakeLevel → ApplyEventsToFloors →
-            // CalculateFloorEntryTimes），而 conductor 尚未 Start()。
-            // 所以这里就能把最优轨迹求解出来并落盘 —— 进关按下开始之前
-            // 就已就绪，不必"先玩一次"。
-            if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation)
-            {
-                Guarded("TracePrewarm", () => MacroEngine.PrewarmTrace());
+                if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation && Main.Settings.LevelConfigAutoLoad)
+                {
+                    LevelTechniqueManager.ResetCheckState();
+                    LevelTechniqueManager.CheckAndLoadLevelConfig();
+                }
+
+                // 轨迹播放器：加载期预热（21:20 前的功能，回退时被误删，已恢复）。
+                // 此刻（scnGame.LoadAndPlayLevel 尾部）整首谱的地板与每块砖的
+                // entryTime 都已经算好（MakeLevel → ApplyEventsToFloors →
+                // CalculateFloorEntryTimes），而 conductor 尚未 Start()。
+                // 所以这里就能把最优轨迹求解出来并落盘 —— 进关按下开始之前
+                // 就已就绪，不必"先玩一次"。
+                if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation)
+                {
+                    Guarded("TracePrewarm", () => MacroEngine.PrewarmTrace());
+                }
             }
+            catch (Exception ex) { ReportToHub(nameof(Patch_scnGame_LoadAndPlayLevel_Postfix), "scnGame.LoadAndPlayLevel", ex); }
         }
 
         [MacroPatch(typeof(scnEditor), "Start", PatchType.Postfix)]
         public static void Patch_scnEditor_Start_Postfix(scnEditor __instance)
         {
-            if (Main.Settings.LockLevelEditor)
-            __instance.LockPathEditing(true);
+            try
+            {
+                if (Main.Settings.LockLevelEditor)
+                    __instance.LockPathEditing(true);
+            }
+            catch (Exception ex) { ReportToHub(nameof(Patch_scnEditor_Start_Postfix), "scnEditor.Start", ex); }
         }
 
         [MacroPatch(typeof(scrController), "Fail2Action", PatchType.Postfix)]
@@ -225,23 +262,27 @@ namespace ADOFAIMacro.Core
         [MacroPatch(typeof(scnEditor), nameof(scnEditor.Play), PatchType.Postfix)]
         public static void Patch_scnEditor_Play_Postfix(scnEditor __instance)
         {
-            if (Main.Settings.Macro)
+            try
             {
-                if (Main.Settings.ChangeJudementInPlay)
-                __instance.editorDifficultySelector.SetChangeable(true);
-                if (Main.Settings.ChangeNoFaillInPlay)
-                __instance.buttonNoFail.interactable = true;
-            }
+                if (Main.Settings.Macro)
+                {
+                    if (Main.Settings.ChangeJudementInPlay)
+                        __instance.editorDifficultySelector.SetChangeable(true);
+                    if (Main.Settings.ChangeNoFaillInPlay)
+                        __instance.buttonNoFail.interactable = true;
+                }
 
-            // 轨迹播放器预热（编辑器试玩路径）（21:20 前的功能，回退时被误删，已恢复）。
-            // 编辑器试玩不走 scnGame.LoadAndPlayLevel，所以上面那个补丁挂不上。
-            // 但 scnEditor.Play() 内部会跑 customLevel.Play(num) →
-            // FinishCustomLevelLoading() → ApplyEventsToFloors()（试玩时 remakeFloors=true），
-            // 返回到这里时地板与 entryTime 已就绪，同样是"按下开始之前"。
-            if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation)
-            {
-                Guarded("TracePrewarmEditor", () => MacroEngine.PrewarmTrace());
+                // 轨迹播放器预热（编辑器试玩路径）（21:20 前的功能，回退时被误删，已恢复）。
+                // 编辑器试玩不走 scnGame.LoadAndPlayLevel，所以上面那个补丁挂不上。
+                // 但 scnEditor.Play() 内部会跑 customLevel.Play(num) →
+                // FinishCustomLevelLoading() → ApplyEventsToFloors()（试玩时 remakeFloors=true），
+                // 返回到这里时地板与 entryTime 已就绪，同样是"按下开始之前"。
+                if (Main.Settings.SimulateKeyPress && Main.Settings.EnableTechniqueSimulation)
+                {
+                    Guarded("TracePrewarmEditor", () => MacroEngine.PrewarmTrace());
+                }
             }
+            catch (Exception ex) { ReportToHub(nameof(Patch_scnEditor_Play_Postfix), "scnEditor.Play", ex); }
         }
 
         // Transpiler 不能走 [MacroPatch]（其方法签名是 instructions 流，不是游戏方法；
@@ -370,7 +411,11 @@ namespace ADOFAIMacro.Core
                         _judgeLogLastMs = nowMs;
                     }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // 内层 catch 原本就吞；这里补上报（低频：AddHit 每次判定都跑，靠 Hub 的 30s 窗口限流压日志）
+                ReportToHub(nameof(Patch_HitErrorMeter_AddHit_Postfix), "scrHitErrorMeter.AddHit", ex);
+            }
         }
 
         // 解析按键字符串为KeyCode列表
@@ -532,7 +577,11 @@ namespace ADOFAIMacro.Core
         [MacroPatch(typeof(scrController), "Awake", PatchType.Postfix)]
         public static void Patch_Awake_Postfix(scrController __instance)
         {
-            CachedController = __instance;
+            try
+            {
+                CachedController = __instance;
+            }
+            catch (Exception ex) { ReportToHub(nameof(Patch_Awake_Postfix), "scrController.Awake", ex); }
         }
 
         // 修改 CountValidKeysPressed 补丁添加黑白名单逻辑
@@ -586,9 +635,13 @@ namespace ADOFAIMacro.Core
         [MacroPatch(typeof(scrPlayer), "CountValidKeysPressed", PatchType.Postfix)]
         public static void scrPlayer_CountValidKeysPressed_Postfix(ref int __result)
         {
-            if (_blockedKeyCount > 0)
-            __result = Math.Max(0, __result - _blockedKeyCount);
-            _blockedKeyCount = 0;
+            try
+            {
+                if (_blockedKeyCount > 0)
+                    __result = Math.Max(0, __result - _blockedKeyCount);
+                _blockedKeyCount = 0;
+            }
+            catch (Exception ex) { ReportToHub(nameof(scrPlayer_CountValidKeysPressed_Postfix), "scrPlayer.CountValidKeysPressed", ex); }
         }
 
         [ThreadStatic]
@@ -742,21 +795,36 @@ namespace ADOFAIMacro.Core
 
         // 修改 SkyHook 按键过滤补丁
         // ★ 此前本方法完全裸奔（每个按键事件都会执行，一帧 NRE = 每帧刷日志）——
-        //   MacroPatchHub 的 TryingCatch 现在是它的第一层防护。
+        //   防护 = 方法体内联 try/catch（2026-10-12 起：Unity Mono 不支持 DynamicMethod
+        //   参数反射，Hub 的 TryingCatch 包装路线废弃，改由各补丁自带 catch）。
+        //   ★ 本补丁是 Prefix：异常时返回 true = 放行按键（宁多判定不丢键）。
         [MacroPatch(typeof(SkyHookManager), "HookCallback", PatchType.Prefix,
             ParameterTypes = new[] { typeof(SkyHookEvent) })]
         public static bool SkyHookManager_HookCallback_Prefix(SkyHookEvent ev)
+        {
+            try
+            {
+                return SkyHookManager_HookCallback_Impl(ev);
+            }
+            catch (Exception ex)
+            {
+                ReportToHub(nameof(SkyHookManager_HookCallback_Prefix), "SkyHookManager.HookCallback", ex);
+                return true; // 异常 = 不过滤，放行（漏过滤比丢键安全）
+            }
+        }
+
+        private static bool SkyHookManager_HookCallback_Impl(SkyHookEvent ev)
         {
             // 0. 镜像回声丢弃：虚拟按键直喂成功后注入的显示用真实按键
             //    会经钩子回流，配额命中即丢弃（虚拟直喂走 KeyUpdated.Invoke，
             //    不经过这里，不受影响）——不丢会导致同一击打判定两次
             if (VirtualAsyncInput.ShouldDropMirrorEcho(ev.Key, ev.Type))
-            return false;
+                return false;
 
             // 0.5 宏自己注入的键：放行并跳过按键过滤。过滤的语义是拦玩家输入，
             //     不是拦宏的输出 —— 白名单模式下否则会把宏用的键全部过滤掉。
             if (VirtualAsyncInput.ConsumeInjectedKey(ev.Key, ev.Type))
-            return true;
+                return true;
 
             // 1. 基本检查
             if (!Application.isPlaying) return true;
@@ -777,11 +845,11 @@ namespace ADOFAIMacro.Core
 
             // 6. 状态检查
             if (!(ctrl.stateMachine.GetState() is States s && s == States.PlayerControl))
-            return true;
+                return true;
 
             bool allowed = IsAsyncKeyAllowed(ev.Key);
             if (!allowed)
-            MacroEngine.Log($"Filtered Async Key: {ev.Label} ({ev.Key}) - {(Main.Settings.FilterMode == 0 ? "Blacklist" : "Whitelist")}");
+                MacroEngine.Log($"Filtered Async Key: {ev.Label} ({ev.Key}) - {(Main.Settings.FilterMode == 0 ? "Blacklist" : "Whitelist")}");
 
             return allowed;
         }
@@ -804,8 +872,12 @@ namespace ADOFAIMacro.Core
             ParameterTypes = new Type[0])]
         public static void AsyncKeyboard_GetSpecialInput_Postfix(List<AsyncKeyCode> __result)
         {
-            if (__result == null || __result.Count == 0) return;
-            __result.RemoveAll(k => Array.IndexOf(PassThroughKeys, k.label) >= 0);
+            try
+            {
+                if (__result == null || __result.Count == 0) return;
+                __result.RemoveAll(k => Array.IndexOf(PassThroughKeys, k.label) >= 0);
+            }
+            catch (Exception ex) { ReportToHub(nameof(AsyncKeyboard_GetSpecialInput_Postfix), "RDInputType_AsyncKeyboard.GetSpecialInput", ex); }
         }
 
         private static readonly KeyLabel[] PassThroughKeys =
