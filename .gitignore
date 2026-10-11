@@ -393,3 +393,5 @@ tools/rollback_*/
 tools/abtest/**/*.cpp
 tools/abtest/**/*.h
 tools/tmp_baseline/
+# ── Rust 构建产物（TriggerRs）──────────────────────────────
+TriggerRs/target/
