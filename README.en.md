@@ -22,6 +22,7 @@
 - [Trigger Modes & Input Paths](#trigger-modes--input-paths)
 - [Settings Reference](#settings-reference)
 - [Technique Simulation Guide](#technique-simulation-guide)
+  - [Trace Player & Trace Cache](#trace-player--trace-cache)
 - [In-Game Hotkeys](#in-game-hotkeys)
 - [Troubleshooting](#troubleshooting)
 - [Building (Developers)](#building-developers)
@@ -34,10 +35,11 @@
 
 - **Auto triggering**: level timestamps → precision-timed key events; double-buffered time anchors sync the main and worker threads, lock-free with zero waiting.
 - **Four input paths**: direct judge / SendInput / SkyHook low-level injection (NtInject / NtSendInput) / virtual async keyboard direct-feed (bypasses system injection, sub-microsecond jitter).
-- **Technique simulation**: left/right hand alternation, automatic time-slice subdivision above a BPM threshold (multi-finger single-hand streams), configurable keys / orders / press durations, speed segments, per-level configs; the core algorithm runs in a native C++ DLL.
+- **Technique simulation**: left/right hand alternation, automatic time-slice subdivision above a BPM threshold (multi-finger single-hand streams), configurable keys / orders / press durations (per-slice accent "strong–weak" patterns), speed segments, per-level configs; the core algorithm runs in a native C++ DLL with offline solving and trace caching.
+- **Trace player**: the whole chart's technique is solved and cached during level loading (zero computation when you hit Start); export / import `.adofaitrace` files for sharing, with time-driven / angle-driven playback.
 - **Timing fine-tuning**: ±100 ms offset, adjustable in-game with arrow keys; automatic judge-error calibration (closed-loop, cancels speed-section offsets).
-- **Key filtering**: blacklist / whitelist, independent sync (KeyCode) and async (VK code) filters.
-- **Extras**: auto keypress on death, GC pause suppression during play, out-of-focus guard, English/Chinese UI.
+- **Key filtering**: blacklist / whitelist, independent sync (KeyCode) and async (VK code) filters; passes through the 4 special keys the game hard-blocks (PrintScreen / F12 / LAlt / Super).
+- **Extras**: auto keypress on death, GC pause suppression during play, out-of-focus guard, macro status badge (HIT / VIRT / NT / SI) with on-screen virtual keys, English/Chinese UI.
 
 ---
 
@@ -88,6 +90,7 @@ Organized by UMM panel tab. "Internal name" is the field used in the config file
 | Panel item | Internal name | Default | Description |
 |---|---|---|---|
 | Enable Macro | `Macro` | off | Master switch. |
+| Enable logging (nothing written to Player.log when off) | `EnableLogging` | on | When off the mod writes no logs; technique-table / diagnostic dump files are unaffected. |
 
 ### Key Settings
 
@@ -109,8 +112,9 @@ Organized by UMM panel tab. "Internal name" is the field used in the config file
 | Allow adjustment of delay using left and right keys (in-game) | `EnableArrowTimeAdjust` | on | <kbd>←</kbd>/<kbd>→</kbd> adjust the offset directly. |
 | Allow adjusting step offset using Ctrl and arrow keys (in-game) | `EnableKeyAdjust` | on | <kbd>Ctrl</kbd>+<kbd>←</kbd>/<kbd>→</kbd> adjust the step. |
 | Enable High Precision Time | `HighPrecisionTime` | off | Switches to a more precise clock source. |
-| [Experimental] Enable High Precision Async | `HighPrecisionAsync` | off | Experimental; leave off unless investigating issues. |
+| [Experimental] Enable High Precision Async (re-enable the mod to apply) | `HighPrecisionAsync` | off | Experimental; leave off unless investigating issues. |
 | Auto judge-error calibration | `AutoCalibrateJudgement` | on | Closed loop: compensates the offset from actual judge errors (including speed sections); re-converges every run. |
+| Suppress GC pauses during play | `SuppressGcPauses` | off | Removes GC-induced error spikes on dense charts (GC happens during loading instead). |
 
 ### Key Filter
 
@@ -125,8 +129,7 @@ Organized by UMM panel tab. "Internal name" is the field used in the config file
 
 | Panel item | Internal name | Default | Description |
 |---|---|---|---|
-| Suppress GC pauses during play | `SuppressGcPauses` | off | Removes GC-induced error spikes on dense charts (GC happens during loading instead). |
-| Auto-press key on death | `EnableDeathKey` | off | **Advanced input (SkyHook) mode only.** |
+| Auto-press key on death | `EnableDeathKey` | off | **Requires both Key simulation and Use advanced input (SkyHook).** |
 | Delay (seconds) | `DeathKeyDelay` | 5 | Seconds to wait after death, 0.1 ~ 30. |
 | Key | `DeathKeyInput` | `R` | Key pressed on death; accepts names (SPACE, ENTER…) or virtual-key codes (0x52). |
 | The game allows switching to failure mode | `ChangeNoFaillInPlay` | off | Unlock NoFail switching during play. |
@@ -150,19 +153,22 @@ When enabled (requires **Key simulation**), the macro stops simply rotating the 
 
 | Panel item | Default | Description |
 |---|---|---|
-| Enable Technique Simulation (L/R alternation) | off | Master switch (requires Key simulation). |
+| Enable Technique Simulation (L/R alternation) | off | Master switch (requires Key simulation; Release builds also require `TechniqueSimulator.dll`). |
 | Starting Hand | Right | Which hand plays the first slice. |
 | Global · Speed Threshold (BPM) | 500 | Subdivide slices above this BPM (range 50 ~ 2000). |
 | L/R Keys | `D,F` / `J,K` | Keys available to each hand; presets DF/JK, DS/JK, ASDF/JKL. |
 | L/R Order | empty | See format below; empty = default rotation. |
 | L/R Ratio | `0.8,0.8` | Press-duration ratio (0 ~ 1): how much of the slice a key stays held; hold notes are handled automatically. |
-| Speed Change Tolerance | 0 | Auto-adjusts BPM to align slices with event timing. 0 = off, 0.2 = moderate, 0.5 = aggressive; for charts with continuous speed changes. |
 
 **Order format**: pipe separates key-count groups, commas separate 1-based indices. Example `1,2 | 1,2 | 1,2,1`: one-key slices alternate keys 1 and 2, three-key slices play 1→2→1. Empty = default order.
 
+**The "strong–weak" accent mechanism**: the order row is picked **by the number of events in the slice** — a slice containing N events uses row N of the order table (clamped to the last row), and every key in that row carries its own press-duration ratio. Dense runs therefore produce a natural strong→weak accent cycle (e.g. a 3-event slice plays `50→1.2 / 51→1 / 82→0.8`). This is why the order table has multiple rows: with only row 1 filled in, multi-event slices have no accent layer.
+
+**Boundary guard (fake-jump fix)**: adjacent notes across a cross-hand slice boundary with a gap under one frame (~16.7 ms) are merged into the earlier slice (capped by that hand's key count, never emptied out of the next slice, never merged across speed-change points), eliminating triplets played as synchronized two-hand hits while preserving the next slice's multi-event nature — the accent pattern survives. Slice length itself is determined purely by per-floor speed (the old "Speed Change Tolerance" has been removed); slice boundaries align to the time grid so the same rhythm pattern keeps a stable starting hand.
+
 ### Profiles
 
-Save multiple complete technique parameter sets (keys, orders, durations, starting hand, tolerance, segments); create / delete / switch from the panel.
+Save multiple complete technique parameter sets (keys, orders, durations, starting hand, segments); create / delete / switch from the panel.
 
 ### Speed Segments
 
@@ -178,9 +184,17 @@ Each level can have its own config:
 
 Useful for smaller key sets on high-BPM sections, custom orders for specific patterns, or per-level fine-tuning.
 
+### Trace Player & Trace Cache
+
+The bottom of the technique panel is the **Trace Player**. With technique simulation enabled, the whole chart's technique is solved and cached during level loading — ready before you press Start; entering the same chart again reads the cache with zero computation. The solve fingerprint covers chart + full technique config + a content hash of the solver DLL — change anything and it automatically re-solves, never reusing stale caches.
+
+- **Driver**: time-driven (default, uses the original time-anchor chain) / angle-driven (triggers by the angle the planet has swept across the current tile, immune to clock jitter; quantized by frame rate so it can be one frame late — compensate with "Angle lead (ms)", range −200 ~ 400).
+- **Solve now**: manually re-solve the current level at any time.
+- **Export / import trace**: exports the current chart's `.adofaitrace` file for sharing; importing validates that it is the same chart + same technique config (fingerprint check), then applies after re-entering the level.
+- **Clear trace cache**: caches live under the game's `persistentDataPath/ADOFAIMacro/trace/`, clearable with one click.
+
 ### Notes
 
-- **The first time you enter the game you need to die once to calibrate the time** (same note as in the panel).
 - The core algorithm runs in the native `TechniqueSimulator.dll` — make sure it is in `Mods/ADOFAIMacro/`. **Release builds produce no technique output without the DLL** (debug builds fall back to the C# implementation).
 
 ---
@@ -205,16 +219,16 @@ Check in order: mod enabled in UMM → Enable Macro checked → key sequence val
 Fine-tune the offset with arrow keys (1 ms steps); for high-frequency charts enable advanced input + Auto mode; for dense charts enable GC pause suppression; if still conflicting, enable the key filter to isolate the source.
 
 **Q3: Large offsets on speed-change charts**
-Make sure auto judge-error calibration is on (default); under technique simulation, raise Speed Change Tolerance or give the speed section its own BPM limit via segments.
+Make sure auto judge-error calibration is on (default); under technique simulation, give the speed section its own BPM limit via segments. Slice length follows per-floor speed automatically — there is no (and no longer any) speed-change tolerance to tune.
 
 **Q4: Death key doesn't work**
-Advanced input (SkyHook) mode only — confirm it's on; confirm the death key is enabled and the key name / code is valid; increase the delay if needed.
+Requires both Key simulation and Use advanced input (SkyHook) — confirm both are on; confirm the death key is enabled and the key name / code is valid; increase the delay if needed.
 
 **Q5: Key-viewer tools can't see macro keys**
-The virtual async keyboard bypasses the system input stream, so third-party tools can't read it — enable "Mirror virtual keys to system input" (on by default).
+The virtual async keyboard bypasses the system input stream, so third-party tools can't read it — enable "Mirror virtual keys to system input" (on by default). The green badge and on-screen virtual keys (top-left corner) are rendered by the mod itself and are unaffected.
 
 **Q6: Key filter "does nothing"**
-Confirm the filter is enabled; confirm the mode (black/whitelist) matches your intent; under advanced input, don't forget the **async** key list.
+Confirm the filter is enabled; confirm the mode (black/whitelist) matches your intent; under advanced input, don't forget the **async** key list. PrintScreen / F12 / LAlt / Super (Win key) work as macro keys with no extra setup — the mod passes through these four keys that the game hard-blocks.
 
 **Q7: The game quits right after enabling the mod**
 `Info.json` was modified (tamper detection) — restore it; or BaseMacro is installed (mutually exclusive) — remove it.
@@ -222,8 +236,8 @@ Confirm the filter is enabled; confirm the mode (black/whitelist) matches your i
 **Q8: Technique simulation produces nothing / DLL unavailable**
 Place `TechniqueSimulator.dll` in `Mods/ADOFAIMacro/`; Release builds generate no technique events without the DLL.
 
-**Q9: Judgement drifts when first entering the game / need to die once?**
-Yes. The first entry requires one death to complete time calibration; after that it's normal.
+**Q9: Judgement drifts when first entering the game**
+Auto judge-error calibration keeps converging during play; usually no manual action is needed. For a persistent offset, compensate manually with "Offset (ms)". Larger error on the very first run is normal (calibration samples come from the current run and are not carried across runs).
 
 When filing an issue, please include: game version, mod version, key settings screenshots, whether SkyHook is used and the current input mode, reproduction steps and logs.
 
@@ -231,9 +245,9 @@ When filing an issue, please include: game version, mod version, key settings sc
 
 ## Building (Developers)
 
-- Environment: Visual Studio 2022 (or MSBuild), .NET Framework 4.8.1, C# 12.
-- Open `ADOFAIMacro-Dev.csproj` (or `ADOFAIMacro-Dev.slnx`) and point the `HintPath`s at your local ADOFAI install — you need the game's `Assembly-CSharp.dll`, `UnityEngine*.dll`, `SkyHook.Unity.dll`, `UnityModManager.dll`, plus `Newtonsoft.Json.dll` (used by the localization system; get it from the game folder or NuGet).
-- Restore NuGet packages (packages.config style) and build Release.
+- Environment: Visual Studio 2022 or newer (with MSBuild), .NET Framework 4.8.1, C# preview.
+- C# side: `ADOFAIMacro/ADOFAIMacro-Dev.csproj` is an SDK-style project (NuGet via `PackageReference`, restored automatically); game assemblies are referenced through the `$(GameManaged)` property pointing at your local ADOFAI install — you need the game's `Assembly-CSharp.dll`, `UnityEngine*.dll`, `SkyHook.Unity.dll`, `UnityModManager.dll`, plus `Newtonsoft.Json.dll` (used by the localization system). Just build Release with MSBuild.
+- Native side: run `cmd /c build_cpp.bat` at the repo root to build both C++ projects (`TechniqueSimulator` / `InputSystem`, each Debug + Release). **After changing native code you must fully rebuild (`/t:Rebuild`) — incremental builds may pick up stale artifacts.**
 - Deploy to `Mods/ADOFAIMacro/`: `ADOFAIMacro.dll` + `Localization/` + `InputSystem.dll` + `TechniqueSimulator.dll`.
 
 ---
@@ -241,29 +255,46 @@ When filing an issue, please include: game version, mod version, key settings sc
 ## Project Structure
 
 ```text
-ADOFAIMacro/
-├─ Main.cs                      # Entry point: mod lifecycle, DLL loading, tamper detection
-├─ Settings.cs                  # Settings + UMM panel UI
-├─ UIUtils.cs                   # Panel drawing helpers
-├─ ShowText.cs                  # In-game key display overlay
-├─ Patches.cs                   # Harmony patches (input chain, judge-error feedback, etc.)
-├─ Localization/
-│  ├─ LocalizationManager.cs    # JSON localization (Newtonsoft.Json)
-│  ├─ zh-CN.json / en-US.json
-├─ Macro/
-│  ├─ Macro.cs                  # Core: time anchors, worker scheduling, event generation
-│  ├─ VirtualAsyncInput.cs      # Virtual async keyboard: feeds the game input queue directly
-│  ├─ AsyncInputManager.cs      # SkyHook input management
+ADOFAIMacro/                    # C# mod (namespaces mirror directories)
+├─ Core/
+│  ├─ Main.cs                   # Entry point: mod lifecycle, DLL loading, tamper detection
+│  ├─ Patches.cs                # All Harmony patches (input chain, judge-error feedback, special-key passthrough…)
+│  └─ GameNotifier.cs           # In-game messages via the game's native notification bar
+├─ Settings/Settings.cs         # Settings + UMM panel UI (all tabs)
+├─ UI/
+│  ├─ UIUtils.cs                # Panel drawing helpers
+│  └─ ShowText.cs               # Macro status badge (HIT/VIRT/NT/SI) + on-screen virtual keys
+├─ Input/
 │  ├─ InputSystem.cs            # InputSystem.dll P/Invoke wrapper
-│  ├─ TechniqueSimulator.cs     # Technique simulator P/Invoke wrapper
-│  ├─ LevelTechniqueManager.cs  # Level-specific technique configs
-│  ├─ PreciseNow.cs             # Precise local time (same clock domain as the game judge)
-│  ├─ DSPTimeSimulater.cs       # Audio DSP time simulation
+│  ├─ VirtualAsyncInput.cs      # Virtual async keyboard: feeds the game input queue directly
+│  ├─ AsyncInputManager.cs      # Injection path management (SkyHook / SendInput dispatch)
 │  ├─ SkyHookSystem.cs          # SkyHook struct definitions
 │  └─ KeyMap.cs                 # Key name → virtual-key code mapping
+├─ Technique/
+│  ├─ MacroEngine.cs            # Technique main flow (partial: judging / calibration / event generation)
+│  ├─ NativeTechnique.cs        # Native DLL calls + per-floor input compression
+│  ├─ PieceBuilder.cs           # C# fallback implementation (debug builds only)
+│  ├─ EventBuilder.cs           # Key event assembly
+│  ├─ ConfigParser.cs           # Order / duration / key string parsing
+│  ├─ KeyWorker.cs              # High-priority key-firing thread (time anchors)
+│  ├─ Clock.cs / Lifecycle.cs   # Clock & lifecycle
+│  ├─ TechniqueSimulator.cs     # Native ABI wrapper (struct layout must match the C++ side exactly)
+│  ├─ TraceFile.cs / TracePlayer.cs  # Trace cache (.adotr) and trace player (.adofaitrace import/export)
+│  └─ LevelTechniqueManager.cs  # Level-specific technique configs (*.adofaimacro.json)
+├─ Calibration/Calibration.cs   # Closed-loop judge-error auto calibration
+├─ Timing/
+│  ├─ PreciseNow.cs             # Unified high-precision clock (same domain as the game judge)
+│  └─ DSPTimeSimulater.cs       # Audio DSP time simulation
+├─ Localization/
+│  ├─ LocalizationManager.cs    # JSON localization (Newtonsoft.Json, with hardcoded fallback)
+│  └─ zh-CN.json / en-US.json
 └─ Platform/
    ├─ Windows.cs / Linux.cs     # Platform high-resolution timing
    └─ BaseSelect.cs             # Platform selection
+TechniqueSimulator/             # C++ technique algorithm (greedy online slicing + beam-search offline solver)
+InputSystem/                    # C++ low-level input injection (NtInject / NtSendInput)
+build_cpp.bat                   # One-click build for both native projects
+tools/                          # Offline evaluation / regression tooling
 ```
 
 ---
