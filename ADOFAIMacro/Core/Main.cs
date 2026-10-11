@@ -48,8 +48,9 @@ namespace ADOFAIMacro.Core
         /// 启动阶段的日志出口。此时 Settings 还没加载完，LoggingEnabled 还是
         /// 默认值 true，用户在设置里关掉的开关要等 Settings.Load 之后才生效
         /// —— 所以启动这几行一定会打（每次进游戏最多十几行）。
+        /// MacroPatchHub 的探针也走这里（探针只在启用模组时打一批）。
         /// </summary>
-        private static void LogStartup(string msg)
+        internal static void LogStartup(string msg)
         {
             try { Mod?.Logger.Log(msg); }
             catch { }
@@ -141,6 +142,14 @@ namespace ADOFAIMacro.Core
         {
             if (value)
             {
+                // ★ MacroPatch 版本网关（移植自 Spectre 的 mod 级门控）：
+                // 低于最低支持版本直接拒绝启用；读不到版本（-1）时放行，
+                // 只降级为探针警告，不因读不到版本而 brick。
+                if (GameVersion.Release >= 0 && GameVersion.Release < MacroPatchHub.MinSupportedBuild)
+                {
+                    Mod?.Logger.Error($"[MacroPatch] 游戏版本 r{GameVersion.Release} 低于最低支持版本 r{MacroPatchHub.MinSupportedBuild}，模组未启用");
+                    return false;
+                }
 #if DEBUG
                 // None
 
@@ -183,7 +192,23 @@ namespace ADOFAIMacro.Core
                 Mod?.Info.DisplayName += " <color=grey>(Debug)</color>";
 
                 IsEnabled = true;
-                Harmony?.PatchAll(Assembly.GetExecutingAssembly());
+
+                // ── MacroPatch 应用器（移植自 Spectre 的 SpectrePatchHub）────
+                // 扫描 [MacroPatch] 声明 → 候选链解析 → 版本门控 → 挂载。
+                // 探针日志在此刻打出（游戏 rXXX，N/M 就绪，失败明细）。
+                // 版本网关：低于最低支持版本拒绝启用（在 OnToggle 开头，见下方）。
+                MacroPatchHub.Initialize(Assembly.GetExecutingAssembly());
+                MacroPatchHub.ApplyAll();
+                MacroPatchHub.ShowApplyFailureSummary();
+
+                // Transpiler 补丁不走 MacroPatch（签名是 IL 流），仍用类级声明挂载：
+                // 只挑出仍带 [HarmonyPatch] 的类型单独 Patch（当前仅 __scrConductor），
+                // 避免把已迁移的 12 个补丁重复挂一遍。
+                foreach (var t in Assembly.GetExecutingAssembly().GetTypes()
+                    .Where(t => t.GetCustomAttribute<HarmonyPatch>() != null))
+                {
+                    Harmony!.CreateClassProcessor(t).Patch();
+                }
 
                 // 关闭模组时 OnToggle(false) 会 FreeLibrary 手法模拟 DLL；再次启用必须
                 // 重载，否则手法模拟在本次游戏会话内永久失效（IsDllLoaded() 恒 false，
@@ -201,6 +226,9 @@ namespace ADOFAIMacro.Core
             else
             {
                 IsEnabled = false;
+                // 先清 Hub 状态（AutoDisabled/失败汇总/限流窗口），再整体卸载 ——
+                // owner 相同，Harmony.UnpatchAll 会把 MacroPatch 与 Transpiler 一起下。
+                MacroPatchHub.UnpatchAll(modEntry.Info.Id);
                 Harmony?.UnpatchAll(modEntry.Info.Id);
                 TrySetWindowTitle(null);
                 // 卸载补丁后 Macro.Update 不会再被调用，必须在这里把

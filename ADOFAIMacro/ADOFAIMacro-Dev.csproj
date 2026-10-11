@@ -64,6 +64,10 @@
     <Compile Include="Core\Main.cs" />
     <Compile Include="Core\Patches.cs" />
     <Compile Include="Core\GameNotifier.cs" />
+    <Compile Include="Core\GameVersion.cs" />
+    <Compile Include="Core\MacroPatch.cs" />
+    <Compile Include="Core\MacroPatchHub.cs" />
+    <Compile Include="Core\GuardFactory.cs" />
   </ItemGroup>
 
   <ItemGroup Label="Technique 手法模拟">
