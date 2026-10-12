@@ -67,21 +67,38 @@ namespace ADOFAIMacro.Technique
         internal const int ACTION_SLEEP = 7;
 
         // ── 熔断参数 ──────────────────────────────────────────────
-        /// <summary>连续异常达到该次数即熔断（回退 C# 路径，模组重启前不再尝试）。</summary>
+        /// <summary>连续异常达到该次数即熔断（本会话内回退 C# 路径）。</summary>
         private const int ConsecutiveFailureLimit = 30;
 
         private static IntPtr _session;
         private static bool _available;
-        private static bool _tripped;          // 已熔断
+        /// <summary>
+        /// 已熔断。★ 语义（2026-10-12 澄清）：**进程级持久**，不在线程重启时清除
+        /// —— 只有进程重启（或显式 ResetTrip，见下）才恢复尝试。
+        /// 原实现把 _tripped=false 放在 TryInitialize 开头，导致换关/宏重开时
+        /// 熔断被静默解除、可能反复踩同一崩溃路径；注释说的「模组重启前不再尝试」
+        /// 与实现不符。现在注释与实现一致。
+        /// </summary>
+        private static bool _tripped;
         private static int _consecutiveFailures;
+        /// <summary>本会话是否已打过探针行。★ 每次新会话（TryInitialize 成功）重置。</summary>
         private static bool _probeDone;
 
         /// <summary>Rust 触发器当前可用（DLL 已加载且未熔断）。</summary>
         internal static bool Available => _available && !_tripped;
 
-        /// <summary>诊断：累计坏输入次数（StepStats 转发）。</summary>
+        // ── 诊断统计（★ 跨会话累计，2026-10-12 修）────────────────
+        // 原来 TotalTicks/BadInputs 每次 RefreshStats 直接覆盖 ⇒ 会话销毁后
+        // 计数归零、跨局无法观察 Rust 路径的总工作量。改为累加：
+        // _lastTicks/_lastBad 记住上一次读到的会话内计数，每次读差值累加。
+        private static ulong _lastTicks;
+        private static ulong _lastBad;
+        /// <summary>诊断：累计坏输入次数（跨会话）。</summary>
         internal static ulong BadInputs { get; private set; }
+        /// <summary>诊断：累计 StepTick 调用次数（跨会话）。</summary>
         internal static ulong TotalTicks { get; private set; }
+        /// <summary>诊断：累计会话数（每次 TryInitialize 成功 +1）。</summary>
+        internal static int SessionCount { get; private set; }
 
         // ── P/Invoke ──────────────────────────────────────────────
         [DllImport("macro_trigger", CallingConvention = CallingConvention.StdCall)]
@@ -107,10 +124,19 @@ namespace ADOFAIMacro.Technique
         /// </summary>
         internal static bool TryInitialize()
         {
-            _tripped = false;
+            // ★ 不在开头清 _tripped（见字段注释）：熔断是进程级状态，换关/宏重开
+            //   不得静默解除。唯一解除途径是进程重启或显式 ResetTrip()。
             _consecutiveFailures = 0;
             _available = false;
+            _probeDone = false;        // ★ 新会话：允许重新打一次探针行
+            _lastTicks = 0;
+            _lastBad = 0;
             if (_session != IntPtr.Zero) { StepFree(_session); _session = IntPtr.Zero; }
+            if (_tripped)
+            {
+                // 已熔断：不再尝试加载（避免反复踩同一崩溃路径）
+                return false;
+            }
             try
             {
                 // 嵌入式加载：macro_trigger.dll 内嵌在 ADOFAIMacro.dll 资源里，
@@ -128,6 +154,7 @@ namespace ADOFAIMacro.Technique
 
                 _session = StepCreate();
                 _available = _session != IntPtr.Zero;
+                if (_available) SessionCount++;
             }
             catch (Exception ex)
             {
@@ -145,10 +172,23 @@ namespace ADOFAIMacro.Technique
         {
             if (_session != IntPtr.Zero)
             {
+                // 退出前最后读一次统计，把本会话增量计入累计（否则最后一个会话的
+                // 计数永远丢失）
+                try { RefreshStats(); } catch { }
                 try { StepFree(_session); } catch { }
                 _session = IntPtr.Zero;
             }
             _available = false;
+            // ★ 不动 _tripped（熔断是进程级状态，见字段注释）
+            _consecutiveFailures = 0;
+        }
+
+        /// <summary>
+        /// 显式解除熔断（仅用于「用户重新启用模组」这类有意重试的场合）。
+        /// 默认不调用 —— 熔断后换关/重开线程不应自动恢复尝试。
+        /// </summary>
+        internal static void ResetTrip()
+        {
             _tripped = false;
             _consecutiveFailures = 0;
         }
@@ -174,15 +214,9 @@ namespace ADOFAIMacro.Technique
             try
             {
                 int act = StepTick(_session, ref anchor, eventIndex, qpcNow, ref wait);
-                if (act == ACTION_NONE)
-                {
-                    // NONE 在正常流里只出现在版本吸收轮；连续 NONE 不算失败。
-                    _consecutiveFailures = 0;
-                }
-                else
-                {
-                    _consecutiveFailures = 0;
-                }
+                // 成功调用即清零连续失败（NONE 在正常流里只出现在版本吸收轮，
+                // 与其它动作码一样不代表失败）——原实现两个分支写了同一句，已合并。
+                _consecutiveFailures = 0;
                 RefreshStats();
                 return act;
             }
@@ -204,11 +238,27 @@ namespace ADOFAIMacro.Technique
                 Trip("坏输入达阈值");
         }
 
+        /// <summary>
+        /// 坏输入**增量**计入熔断计数（★ 2026-10-12 修：RefreshStats 每事件调用，
+        /// 原来只要 bad>0 就 ReportBadInput 一次 ⇒ 单次坏输入会被反复计数、
+        /// 30 次阈值被秒穿。改为按增量调用）。
+        /// </summary>
+        private static void ReportBadInputDelta(ulong delta)
+        {
+            if (delta == 0) return;
+            _consecutiveFailures += (int)Math.Min(delta, int.MaxValue);
+            if (_consecutiveFailures >= ConsecutiveFailureLimit)
+                Trip("坏输入达阈值");
+        }
+
         private static void Trip(string why)
         {
             if (_tripped) return;
             _tripped = true;
-            Main.Log($"[TriggerRs] 已熔断（{why}），回退 C# 触发路径；重新启用模组前不再尝试");
+            // ★ 语义（2026-10-12 修正）：熔断是**进程级**的 —— 换关/重开工作线程
+            //   不会自动恢复（原实现在 TryInitialize 里清 _tripped，与这句话不符）。
+            Main.Log($"[TriggerRs] 已熔断（{why}），本次运行期间回退 C# 触发路径"
+                + "（进程重启或用户重新启用模组后才会再尝试）");
             try
             {
                 GameNotifier.Warning("Rust 触发器异常已熔断，回退内置路径（详见日志）", 5f);
@@ -216,18 +266,34 @@ namespace ADOFAIMacro.Technique
             catch { /* 通知栏不可用不阻塞 */ }
         }
 
+        /// <summary>
+        /// 读会话统计并**累加**到跨会话计数（★ 2026-10-12 修：原实现直接覆盖，
+        /// 会话销毁后归零、跨局无法观察总工作量）。
+        /// 每事件调用一次成本很低（一次 P/Invoke），但探针日志只在每会话首点打一次。
+        /// </summary>
         private static void RefreshStats()
         {
-            if (_probeDone) return;
+            if (_session == IntPtr.Zero) return;
             try
             {
                 StepStats(_session, out var ticks, out var bad);
-                TotalTicks = ticks;
-                BadInputs = bad;
-                if (bad > 0) ReportBadInput();
-                // 只在首个诊断点打一条探针（避免每事件刷日志）
-                Main.Log($"[TriggerRs] 探针: ticks={ticks} badInputs={bad}");
-                _probeDone = true;
+                // 会话内计数单调递增；取差值累加（若 Rust 侧计数回绕/重置，差值会
+                // 下溢，用 unchecked 后夹 0 处理）
+                ulong dTicks = ticks >= _lastTicks ? ticks - _lastTicks : ticks;
+                ulong dBad = bad >= _lastBad ? bad - _lastBad : bad;
+                _lastTicks = ticks;
+                _lastBad = bad;
+                TotalTicks += dTicks;
+                BadInputs += dBad;
+                if (dBad > 0) ReportBadInputDelta(dBad);
+
+                if (!_probeDone)
+                {
+                    _probeDone = true;
+                    // 每会话首点打一条（含累计值），避免每事件刷日志
+                    Main.Log($"[TriggerRs] 探针: 本会话 ticks={ticks} badInputs={bad}"
+                        + $" | 累计 ticks={TotalTicks} badInputs={BadInputs} 会话数={SessionCount}");
+                }
             }
             catch { }
         }

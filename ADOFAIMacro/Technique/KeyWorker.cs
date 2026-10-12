@@ -37,8 +37,11 @@ namespace ADOFAIMacro.Technique
                 // ── Rust 触发器初始化（阶段 2：并行开关，默认关）────
                 // 开启且 DLL 加载成功 → 触发判定走 TriggerRs（Rust）；
                 // 加载失败/中途熔断 → 全程退回下方 C# 原路径（语义不变）。
-                rustTrigger = global::ADOFAIMacro.Settings.Settings.UseRustTrigger && TriggerRsHost.TryInitialize();
-                if (global::ADOFAIMacro.Settings.Settings.UseRustTrigger && !rustTrigger)
+                // ★ UseRustTrigger 是实例属性（2026-10-12 由 static 改为实例，
+                //   否则 UMM 不序列化、开关不持久化），工作线程经 Main.Settings 读。
+                bool useRust = Main.Settings.UseRustTrigger;
+                rustTrigger = useRust && TriggerRsHost.TryInitialize();
+                if (useRust && !rustTrigger)
                     Log("[Macro-Worker] Rust 触发器不可用，使用 C# 触发路径");
 
                 int localLastFloor = Volatile.Read(ref _workerLastTriggeredFloor);

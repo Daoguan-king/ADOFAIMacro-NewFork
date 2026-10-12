@@ -215,6 +215,10 @@ namespace ADOFAIMacro.Core
                 // Release 面板还会据此强制关闭"启用手法模拟"）。
                 if (!TechniqueSimulator.IsDllLoaded() && !TechniqueSimulator.LoadTechniqueDll())
                 Main.Log("[TechniqueSimulator] 技巧模拟器 DLL 重新加载失败");
+
+                // ★ 用户「重新启用模组」= 有意重试：解除 Rust 触发器的进程级熔断
+                // （熔断后换关/重开工作线程不会自动恢复，见 TriggerRsHost 字段注释）。
+                Technique.TriggerRsHost.ResetTrip();
                 if (_uiObject == null)
                 {
                     _uiObject = new GameObject("MacroText");

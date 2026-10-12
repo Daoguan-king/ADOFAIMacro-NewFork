@@ -586,8 +586,14 @@ namespace ADOFAIMacro.Settings
         // DLL 缺失/连续异常时自动回退 C# 路径（见 TriggerRsHost）。
         // Release 版同样可开（TriggerRs 与 TechniqueSimulator 互不替代：
         // 一个管"何时发"，一个管"发什么"）。
-        private static bool _useRustTrigger;
-        public static bool UseRustTrigger
+        //
+        // ★【2026-10-12 修 bug】原为 static 字段 + static 属性 —— UMM 的设置
+        //   序列化只遍历**实例**成员（BindingFlags.Instance），static 成员既不
+        //   写进 Settings.xml 也不从 XML 读回 ⇒ 开关每次重启都回到默认（关）。
+        //   改为实例属性，与同文件的 MirrorVirtualKeys / UseVirtualAsyncInput
+        //   完全同构；工作线程照旧通过 Main.Settings.UseRustTrigger 读。
+        private bool _useRustTrigger;
+        public bool UseRustTrigger
         {
             get => _useRustTrigger;
             set { if (_useRustTrigger == value) return; _useRustTrigger = value; }
@@ -1399,9 +1405,10 @@ namespace ADOFAIMacro.Settings
 
             // ── Rust 触发器（阶段 2：并行开关，默认关）────────────
             // DLL 缺失/熔断时自动回退 C# 路径（见 TriggerRsHost），开关不强制改写。
-            bool newRust = UIUtils.M3Switch(Settings.UseRustTrigger,
+            // ★ UseRustTrigger 是**实例**属性（2026-10-12 修：原 static 不参与 UMM 序列化）
+            bool newRust = UIUtils.M3Switch(UseRustTrigger,
                 LocalizationManager.Get("tech.use_rust_trigger"));
-            if (newRust != Settings.UseRustTrigger) Settings.UseRustTrigger = newRust;
+            if (newRust != UseRustTrigger) UseRustTrigger = newRust;
             GUILayout.Label(LocalizationManager.Get("tech.use_rust_trigger_hint"), tipStyle);
             GUILayout.Space(6);
 
