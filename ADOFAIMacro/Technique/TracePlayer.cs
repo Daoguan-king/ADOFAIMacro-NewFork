@@ -154,6 +154,7 @@ namespace ADOFAIMacro.Technique
                 _angleResynced = false;
                 _songZeroValid = false;
                 _lastSweepFloor = long.MinValue;
+                EnsureAngleAsyncRunning();   // 运行中切到角度驱动 → 启动异步线程
             }
             else
             {
@@ -165,6 +166,7 @@ namespace ADOFAIMacro.Technique
                 _angleResynced = false;
                 _songZeroValid = false;
                 _lastSweepFloor = long.MinValue;
+                StopAngleAsync();            // 运行中切回时间驱动 → 停异步线程
             }
             _staticAnchorVersion++;
         }
@@ -588,6 +590,8 @@ namespace ADOFAIMacro.Technique
                 _angleDriverActive = true;
                 _anglePlayIndex = -1;
                 _angleResynced = false;
+                // 启动异步发键线程（失败则 AngleDriverTick 自动退回帧同步直发）
+                EnsureAngleAsyncRunning();
             }
             else
             {
@@ -599,6 +603,7 @@ namespace ADOFAIMacro.Technique
                 }
                 _hitEvents = converted;
                 _hitEventCount = converted.Length;
+                StopAngleAsync();   // 切回时间驱动：异步线程不再需要
             }
 
             _staticAnchorVersion++;      // 让工作线程下一帧换到新表
@@ -620,6 +625,8 @@ namespace ADOFAIMacro.Technique
             _lastSweepFloor = long.MinValue;
             _playbackInfo = string.Empty;
             PlaybackFromCache = false;
+            // 异步发键线程：换关时停掉（线程退出前会松开它自己按下的键）
+            StopAngleAsync();
         }
 
         /// <summary>TraceEvent → HitEvent（时间驱动：丢掉角度信息，语义与原生事件表一致）</summary>
@@ -740,9 +747,13 @@ namespace ADOFAIMacro.Technique
             // 它的 ReleaseOnly → 卡键。必须放在 return **之前**，否则是死代码。
             if (controller.paused || controller.state != global::States.PlayerControl)
             {
+                // 异步路径：清空待发队列 + 让工作线程松开它按下的键（防越界发键/卡键）
+                FlushAngleAsync();
                 ReleaseAllAngleKeys(controller.paused ? "游戏暂停" : "离开游玩状态");
                 return;
             }
+            // 回到正常游玩态：恢复异步发布（幂等）
+            ResumeAngleAsync();
 
             scrPlanet? planet = controller.chosenPlanet;
             if (planet == null) return;
@@ -769,6 +780,7 @@ namespace ADOFAIMacro.Technique
                 _angleResynced = false;
                 _songZeroValid = false;
                 // 重同步会让游标跳过区间，松键可能永不发出 —— 先把还按着的键全松开
+                FlushAngleAsync();          // 异步路径：清队列 + 让工作线程松开它的键
                 ReleaseAllAngleKeys("砖序回退");
             }
             _lastSweepFloor = sweepFloor;
@@ -812,6 +824,8 @@ namespace ADOFAIMacro.Technique
             if (_anglePlayIndex >= count)
             {
                 // 事件表跑完仍按着 = 卡键，兜底松开（时间驱动同款）
+                // 异步路径：先清空待发队列（表已跑完，不应再有事件发出）
+                FlushAngleAsync();
                 ReleaseAllAngleKeys("事件表跑完");
                 return;
             }
@@ -893,7 +907,7 @@ namespace ADOFAIMacro.Technique
                 // 游戏按"当下帧"判定，与真实玩家慢了一拍的手感等价，不会灾难偏移。
                 if (ev.FloorIndex < sweepFloor)
                 {
-                    FireTraceEvent(ev, simulateKey, enableTechnique);
+                    FireTraceEventAsync(ev, simulateKey, enableTechnique, 0);
                     frameSends++;
                     _anglePlayIndex++;
                     continue;
@@ -911,7 +925,7 @@ namespace ADOFAIMacro.Technique
                 {
                     if (_timingWarnSpam++ < 8)
                         Main.Log($"[Macro-Player] 事件判定时刻异常 (TriggerTime={ev.TriggerTime:F3})，按当下发");
-                    FireTraceEvent(ev, simulateKey, enableTechnique);
+                    FireTraceEventAsync(ev, simulateKey, enableTechnique, 0);
                     frameSends++;
                     _anglePlayIndex++;
                     continue;
@@ -919,8 +933,9 @@ namespace ADOFAIMacro.Technique
                 long hitStarTicks = (long)hitStar;
 
                 // 到点判据（含用户提前量）：还没到点 → 后面的更没到，整批等下一帧。
-                // （必须"到点才发"——若提前入队，游戏会立刻把判定与视觉推进到
-                //   未来时刻，星球前跳；晚一帧发不影响精度，判定由时间戳决定。）
+                // （异步路径下这一条仍是主线程的推进闸门：只发布"已到点"的事件，
+                //   保证发布顺序 = 游标顺序 = 帧同步路径的发送顺序；等待与发键
+                //   由工作线程做，它到点就发，不再受帧率量化。）
                 if (hitStarTicks - leadTicks > nowTicks)
                     break;
 
@@ -947,7 +962,9 @@ namespace ADOFAIMacro.Technique
                 // 且时间驱动没有对应实现 —— 两种驱动的键流因此不一致；它还会把
                 // 密集段的松键事件吞进直判计数通道（keyup 永不发出 → 卡键）。
                 // 全部删除，回到与时间驱动同构的"每个事件都发键"。
-                FireTraceEvent(ev, simulateKey, enableTechnique, eventTicks);
+                // 【2026-10-12 异步化】走 FireTraceEventAsync：可用时交给工作线程
+                // 精确等到 eventTicks 再发（消除帧量化延迟），失败则主线程直发。
+                FireTraceEventAsync(ev, simulateKey, enableTechnique, eventTicks);
                 frameSends++;
                 _anglePlayIndex++;
             }
@@ -961,6 +978,29 @@ namespace ADOFAIMacro.Technique
         /// 松键一律比按下早 1 tick 入队：.NET PriorityQueue 同优先级出队顺序
         /// 未定义，显式错开才能保证「先松旧键、后按新键」的确定性时序。
         /// </summary>
+        /// <summary>
+        /// 角度驱动的发键入口（2026-10-12 异步化）。
+        ///
+        /// 异步路径可用时：把事件**发布**给 AngleAsyncDriver 的工作线程，
+        /// 由它精确等到 eventTicks 到点再发 —— 消除「主线程每帧才检查一次」
+        /// 造成的 0~1 帧延迟（用户诊断「角度驱动不是异步的」）。
+        /// 发布失败（线程未运行/队列满）→ 退回原来的主线程直发，保证不丢键。
+        ///
+        /// ★ 时间戳语义不变：eventTicks 仍由调用方按原公式算出并钳位，
+        /// 工作线程只是「更早、更准地执行 SendKey」。
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void FireTraceEventAsync(in TraceFile.TraceEvent ev, bool simulateKey, bool enableTechnique, long eventTicks)
+        {
+            if (eventTicks > 0 && _aadRunning &&
+                PublishAngleEvent(eventTicks, ev.TriggerTime, ev.KeyCode, ev.ReleaseKeyCode,
+                    ev.ReleaseOnly, ev.IsHoldRelated, simulateKey, enableTechnique))
+                return;
+
+            // 兜底：线程不可用或时间戳无效 → 主线程直发（原路径）
+            FireTraceEvent(in ev, simulateKey, enableTechnique, eventTicks);
+        }
+
         private static void FireTraceEvent(in TraceFile.TraceEvent ev, bool simulateKey, bool enableTechnique, long eventTicks = 0)
         {
             long upTicks = eventTicks > 0 ? eventTicks - 1 : 0;   // 松键时间戳（确定性排序）
