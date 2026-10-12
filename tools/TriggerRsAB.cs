@@ -57,12 +57,18 @@ static class TriggerRsAB
     const long FREQ = 10_000_000L; // 虚拟时钟用 100ns 刻度，freq=1e7（等价高精度时钟域）
 
     // ── C# 决策（复刻 WorkerLoop 判定式，返回与 Rust 同一动作码空间）──
+    // ★【2026-10-12 修正】旧版这里写了 `idx >= count - 1 → FINISHED`，与 Rust 的
+    //   同款错误互相印证 → A/B 恒 0 不一致，把「最后一拍被吞」的真 bug 漏掉了。
+    //   真实 C# WorkerLoop：for 条件 `i < evCount` 允许最后一个事件正常触发，
+    //   FINISHED 哨兵在外层 for 之前（本地索引 >= evCount-1 时睡眠等重置）。
+    //   这里按真实语义修正：只有 idx >= count（越界）才 FINISHED。
     static int CsDecision(double songPosRef, double rate, double timeOffset, double staleSec,
         double elapsed, int idx, int count, List<Ev> evs, out double deltaOut, out double sleepSec)
     {
         deltaOut = 0; sleepSec = 0.001;
         if (elapsed > staleSec) return ACTION_SLEEP;
-        if (idx >= count - 1) return ACTION_FINISHED;
+        if (idx >= count) return ACTION_FINISHED;
+        if (idx < 0) return ACTION_FINISHED;
         var e = evs[idx];
         double audioNow = songPosRef + elapsed * rate;
         double triggerAt = e.TriggerTime + timeOffset;
@@ -140,7 +146,11 @@ static class TriggerRsAB
 
                 StepTick(sess, ref a, 0, 0, ref w); // 版本吸收轮
 
-                for (int idx = 0; idx < evs.Count - 1; idx++)
+                // ★【2026-10-12 修正】idx 循环包含最后一个事件（idx <= Count-1）：
+                //   旧版 `idx < evs.Count - 1` 把最后一拍排除在比对之外，与两边的
+                //   FINISHED 早退互相掩护。现在最后一拍也进比对（Rust 修复后应
+                //   返回 PRESS/RELEASE 而非 FINISHED）。
+                for (int idx = 0; idx < evs.Count; idx++)
                 {
                     // 推进到「恰好到达该事件触发时刻」的 tick（elapsed == triggerTime）
                     long qpcAt = (long)(evs[idx].TriggerTime * FREQ);

@@ -146,8 +146,22 @@ pub unsafe extern "system" fn StepTick(
         return ACTION_SLEEP;
     }
 
-    // 事件表尾部
-    if event_index >= a.event_count - 1 {
+    // 事件表越界（含最后一拍**之后**）才 FINISHED。
+    //
+    // ★【2026-10-12 修 bug】旧写法 `event_index >= a.event_count - 1 → FINISHED`
+    //   会把「最后一拍」本身吞掉：C# for 循环 `i < evCount` 允许 i == evCount-1
+    //   进入并正常触发（C# 的 FINISHED 哨兵在外层 for **之前**），而 Rust 在
+    //   i == evCount-1 时未看触发时刻就返回 FINISHED → C# case FINISHED 只松键
+    //   + goto WriteBack → **最后一拍永不发**（用户实机：「TriggerRs 没有播放完
+    //   关卡」）。离线 A/B 也没拦住——TriggerRsAB 的 C# 参照复刻了同一句错，
+    //   两边一起错=0 不一致（已同步修正）。
+    //   正确语义：event_index == event_count-1 与普通事件一样走触发判定；
+    //   越界（>= event_count）才 FINISHED。
+    if event_index >= a.event_count {
+        return ACTION_FINISHED;
+    }
+    if event_index < 0 {
+        s.bad_inputs += 1;
         return ACTION_FINISHED;
     }
 

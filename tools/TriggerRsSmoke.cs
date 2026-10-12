@@ -159,8 +159,16 @@ static class StepFfiSmoke
                 a.SongPosRef = 2.6;
                 act = StepTick(sess, ref a, 2, q, ref w);
                 Check("到时刻松开→RELEASE", act == ACTION_RELEASE, $"act={act}");
-                act = StepTick(sess, ref a, 3, q, ref w); // 尾事件 → FINISHED
-                Check("尾事件→FINISHED", act == ACTION_FINISHED, $"act={act}");
+                // ★【2026-10-12 语义修正】尾事件（idx == count-1）不再是 FINISHED：
+                //   旧语义把最后一拍吞掉（实机「TriggerRs 没有播放完关卡」）。
+                //   新语义：idx3（TriggerTime=4.0）在 audioNow=1.0 时刻是「未到」→
+                //   先返回 WAIT_AGAIN/SLEEP（等时间推进）；把它推到到点后应 PRESS。
+                act = StepTick(sess, ref a, 3, q, ref w);
+                Check("尾事件未到时刻→等待（非 FINISHED）", act == ACTION_WAIT_AGAIN || act == ACTION_SLEEP, $"act={act}");
+                // 把锚点推到 idx3 的到点时刻，验证最后一拍能正常 PRESS
+                a.SongPosRef = 3.6;
+                act = StepTick(sess, ref a, 3, a.QpcSnapshot + (long)(QpcFreq * 0.4), ref w);
+                Check("尾事件到时刻→PRESS（修复：最后一拍不被吞）", act == ACTION_PRESS, $"act={act}");
             }
         }
 
