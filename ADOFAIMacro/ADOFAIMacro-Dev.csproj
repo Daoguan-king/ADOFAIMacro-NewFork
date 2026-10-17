@@ -120,9 +120,11 @@
   <!-- 程序集元数据：原在 Properties\AssemblyInfo.cs，已并入此处。 -->
   <PropertyGroup>
     <Product>ADOFAIMacro</Product>
-    <AssemblyVersion>1.3.0.30</AssemblyVersion>
-    <FileVersion>1.3.0.30</FileVersion>
-    <Version>1.3.0.30</Version>
+    <!-- 1.4.0-alpha20 发布：AssemblyVersion 必须纯数字（CLR 限制），
+         带后缀的版本号放 FileVersion/Version（Info.json 的 Version 由 UMM 解析，可带后缀）。 -->
+    <AssemblyVersion>1.4.0.0</AssemblyVersion>
+    <FileVersion>1.4.0.20</FileVersion>
+    <Version>1.4.0-alpha20</Version>
     <Company></Company>
     <Description></Description>
     <Copyright>Copyright ©  2026</Copyright>
