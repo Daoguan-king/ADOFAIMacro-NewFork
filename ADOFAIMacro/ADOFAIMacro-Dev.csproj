@@ -285,7 +285,12 @@
     分开，因为 vcxproj 不能放进 SDK 项目的目录树里）。
     打包目录 out\<Cfg>\ 是部署布局的单一来源。
   -->
-  <Target Name="BuildTriggerRs" BeforeTargets="Build" Condition="'$(Configuration)' == 'Release'">
+  <!--
+      必须挂 PrepareResources 而不是 Build：Build 依赖 CoreBuild（编译在其内），
+      BeforeTargets="Build" 实际在编译之后才执行。本机因 DLL 早已存在而不报错，
+      干净检出（CI）会在 csc 读取嵌入资源时报 CS1566。
+    -->
+  <Target Name="BuildTriggerRs" BeforeTargets="PrepareResources" Condition="'$(Configuration)' == 'Release'">
     <!--
       构建 Rust 触发内核（TriggerRs → macro_trigger.dll）。
       仅 Release 构建（Debug 用 C# 触发路径，减少调试变量）；
