@@ -367,6 +367,11 @@ TechniqueSimulator.dll
 InputSystem.dll
 ADOFAIMacro.dll
 
+# CI 用的预编译原生 DLL（runner 没有 v145 C++ 工具链）。
+# 上面的裸文件名规则会匹配任意层级，这里按目录重新放行。
+!native/prebuilt/
+!native/prebuilt/*.dll
+
 # Agent instructions (project-specific LLM context)
 CLAUDE.md
 AGENTS.md

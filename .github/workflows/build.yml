@@ -1,0 +1,137 @@
+name: Build and Release
+
+on:
+  push:
+    # 所有分支都构建，便于在合并前发现编译失败
+    branches: ['**']
+    # 只让版本号形态的 tag 触发发布，避免 backup-* / archive/* 误发 release
+    tags: ['[0-9]*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PROJECT_PATH: ADOFAIMacro/ADOFAIMacro-Dev.csproj
+  DOTNET_VERSION: '10.0.x'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # 游戏与 UnityModManager 程序集不在本仓库（版权原因），从私有库检出。
+      # 布局对齐本机游戏 Managed\ + Managed\UnityModManager\。
+      - name: Checkout game DLLs
+        uses: actions/checkout@v6
+        with:
+          repository: 2228293026/adofai-libs
+          token: ${{ secrets.LIBS_ACCESS_TOKEN }}
+          path: GameLibs
+
+      - name: Arrange game DLL layout
+        shell: pwsh
+        run: |
+          $managed = "GameLibs"
+          $umm = Join-Path $managed "UnityModManager"
+          New-Item -ItemType Directory -Force -Path $umm | Out-Null
+          Move-Item (Join-Path $managed "UnityModManager.dll") $umm -Force
+          Move-Item (Join-Path $managed "0Harmony.dll") $umm -Force
+          Write-Host "Managed DLLs: $((Get-ChildItem $managed -Filter *.dll).Count)"
+          Write-Host "UMM DLLs: $((Get-ChildItem $umm -Filter *.dll).Count)"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # macOS / Ubuntu 上 setup-dotnet 装不到 windows 版 Rust，这里用 rustup 官方脚本
+      - name: Install Rust (MSVC)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+          Start-Process -FilePath .\rustup-init.exe -ArgumentList '-y','--default-toolchain','stable-x86_64-pc-windows-msvc','--profile','minimal' -Wait -NoNewWindow
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Show toolchain versions
+        shell: pwsh
+        run: |
+          dotnet --version
+          dotnet --list-sdks
+          cargo --version
+          rustc --version
+
+      # -p:GameManaged 覆盖 csproj 里写死的本机 Steam 路径；
+      # -p:CargoExe 覆盖写死的 D:\Rust 路径。
+      # LangVersion=preview 下 [with(N)] 需要 C# 14 编译器 —— dotnet 10 SDK 自带。
+      - name: Build (Release)
+        shell: pwsh
+        run: |
+          dotnet build ${{ env.PROJECT_PATH }} -c Release `
+            -p:GameManaged="${{ github.workspace }}\GameLibs" `
+            -p:CargoExe="$env:USERPROFILE\.cargo\bin\cargo.exe" `
+            --nologo -v:m
+
+      - name: Verify packaged layout
+        shell: pwsh
+        run: |
+          $pack = "out\Release"
+          $required = @(
+            "ADOFAIMacro.dll", "Info.json", "InputSystem.dll",
+            "TechniqueSimulator.dll", "System.Memory.dll",
+            "Localization\zh-CN.json", "Localization\en-US.json"
+          )
+          $missing = @()
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $pack $f))) { $missing += $f }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "Package layout incomplete, missing: $($missing -join ', ')"
+            exit 1
+          }
+          Get-ChildItem $pack -Recurse -File | Select-Object FullName, Length
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ADOFAIMacro-package
+          path: out/Release/**
+
+  package:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ADOFAIMacro-package
+          path: ./package
+
+      - name: Create zip
+        run: cd package && zip -r ../ADOFAIMacro.zip . && cd ..
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ADOFAIMacro-zip
+          path: ADOFAIMacro.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ADOFAIMacro-zip
+          path: ./
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ADOFAIMacro.zip
+          # 版本号带后缀（如 1.4.0-alpha20）视为预发布
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

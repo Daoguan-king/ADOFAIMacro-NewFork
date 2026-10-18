@@ -293,16 +293,20 @@
       镜像环境变量（RUSTUP_HOME/CARGO_HOME）沿用用户级持久变量（D:\Rust）。
     -->
     <PropertyGroup>
-      <_CargoExe>D:\Rust\.cargo\bin\cargo.exe</_CargoExe>
+      <!-- 本机 Rust 装在 D:\Rust；CI 用 -p:CargoExe=<绝对路径> 覆盖。 -->
+      <CargoExe Condition="'$(CargoExe)' == ''">D:\Rust\.cargo\bin\cargo.exe</CargoExe>
+      <_CargoExe>$(CargoExe)</_CargoExe>
       <_TriggerRsDir>$(RepoRoot)TriggerRs</_TriggerRsDir>
       <_TriggerDll>$(_TriggerRsDir)\target\release\macro_trigger.dll</_TriggerDll>
+      <!-- 仅本机自定义安装位置需要显式传 RUSTUP_HOME/CARGO_HOME；CI 用 rustup 默认环境。 -->
+      <_RustEnv Condition="'$(CargoExe)' == 'D:\Rust\.cargo\bin\cargo.exe'">RUSTUP_HOME=D:\Rust\.rustup;CARGO_HOME=D:\Rust\.cargo</_RustEnv>
     </PropertyGroup>
     <Error Condition="!Exists('$(_CargoExe)') And !Exists('$(_TriggerDll)')"
-           Text="TriggerRs: 未找到 cargo（D:\Rust\.cargo\bin\cargo.exe）且无预编译 macro_trigger.dll，请安装 Rust 或手动放置 DLL" />
+           Text="TriggerRs: 未找到 cargo（$(_CargoExe)）且无预编译 macro_trigger.dll，请安装 Rust 或手动放置 DLL" />
     <Exec Condition="Exists('$(_CargoExe)')"
-          Command="$(_CargoExe) build --release"
+          Command="&quot;$(_CargoExe)&quot; build --release"
           WorkingDirectory="$(_TriggerRsDir)"
-          EnvironmentVariables="RUSTUP_HOME=D:\Rust\.rustup;CARGO_HOME=D:\Rust\.cargo"
+          EnvironmentVariables="$(_RustEnv)"
           IgnoreExitCode="false" />
     <Message Condition="!Exists('$(_CargoExe)') And Exists('$(_TriggerDll)')"
              Importance="normal" Text="TriggerRs: cargo 不可用，使用既有预编译 macro_trigger.dll" />
@@ -311,7 +315,11 @@
   <Target Name="CopyNativeDlls" AfterTargets="Build">
     <PropertyGroup>
       <_TechSimDll>$(RepoRoot)TechniqueSimulator\x64\$(Configuration)\TechniqueSimulator.dll</_TechSimDll>
+      <!-- CI 没有 v145 C++ 工具链（也编不了本机未入库的源码改动），
+           回退到入库的预编译 DLL —— 与发布包内二进制一致。 -->
+      <_TechSimDll Condition="!Exists('$(_TechSimDll)')">$(RepoRoot)native\prebuilt\TechniqueSimulator.dll</_TechSimDll>
       <_InputSysDll>$(RepoRoot)InputSystem\x64\$(Configuration)\InputSystem.dll</_InputSysDll>
+      <_InputSysDll Condition="!Exists('$(_InputSysDll)')">$(RepoRoot)native\prebuilt\InputSystem.dll</_InputSysDll>
       <_PackDir>$(RepoRoot)out\$(Configuration)\</_PackDir>
     </PropertyGroup>
 
@@ -322,7 +330,8 @@
     <!-- 再汇总到打包目录 -->
     <MakeDir Directories="$(_PackDir)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(_PackDir)" />
-    <Copy SourceFiles="$(RepoRoot)Info.json" DestinationFolder="$(_PackDir)" Condition="Exists('$(RepoRoot)Info.json')" />
+    <!-- Info.json 在项目目录下（RepoRoot 是仓库根，之前写错导致打包目录漏掉它）。 -->
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)Info.json" DestinationFolder="$(_PackDir)" Condition="Exists('$(MSBuildThisFileDirectory)Info.json')" />
     <Copy SourceFiles="$(OutDir)TechniqueSimulator.dll" DestinationFolder="$(_PackDir)" Condition="Exists('$(OutDir)TechniqueSimulator.dll')" />
     <Copy SourceFiles="$(OutDir)InputSystem.dll"        DestinationFolder="$(_PackDir)" Condition="Exists('$(OutDir)InputSystem.dll')" />
     <Copy SourceFiles="$(OutDir)System.Memory.dll"     DestinationFolder="$(_PackDir)" Condition="Exists('$(OutDir)System.Memory.dll')" />
