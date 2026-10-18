@@ -2,8 +2,10 @@
 
 [![License](https://img.shields.io/github/license/adofaiex/ADOFAIMacro?color=blue)](LICENSE.txt)
 [![Downloads](https://img.shields.io/github/downloads/adofaiex/ADOFAIMacro/total)](https://github.com/adofaiex/ADOFAIMacro/releases)
+[![Build](https://github.com/adofaiex/ADOFAIMacro/actions/workflows/build.yml/badge.svg)](https://github.com/adofaiex/ADOFAIMacro/actions/workflows/build.yml)
 [![C# 14.0](https://img.shields.io/badge/C%23-14.0-239120?logo=csharp&logoColor=white)](https://learn.microsoft.com/dotnet/csharp/)
 [![.NET Framework 4.8.1](https://img.shields.io/badge/.NET%20Framework-4.8.1-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/download/dotnet-framework)
+[![Rust](https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 [中文说明](README.md)
 
@@ -35,8 +37,8 @@
 
 - **Auto triggering**: level timestamps → precision-timed key events; double-buffered time anchors sync the main and worker threads, lock-free with zero waiting.
 - **Four input paths**: direct judge / SendInput / SkyHook low-level injection (NtInject / NtSendInput) / virtual async keyboard direct-feed (bypasses system injection, sub-microsecond jitter).
-- **Technique simulation**: left/right hand alternation, automatic time-slice subdivision above a BPM threshold (multi-finger single-hand streams), configurable keys / orders / press durations (per-slice accent "strong–weak" patterns), speed segments, per-level configs; the core algorithm runs in a native C++ DLL with offline solving and trace caching.
-- **Trace player**: the whole chart's technique is solved and cached during level loading (zero computation when you hit Start); export / import `.adofaitrace` files for sharing, with time-driven / angle-driven playback.
+- **Technique simulation**: left/right hand alternation, automatic time-slice subdivision above a BPM threshold (multi-finger single-hand streams), configurable keys / orders / press durations (per-slice accent "strong–weak" patterns), speed segments, per-level configs; the core algorithm runs in a native C++ DLL with offline solving and trace caching, plus an optional Rust trigger kernel (embedded in the main DLL — no extra files to ship).
+- **Trace player**: the whole chart's technique is solved and cached during level loading (zero computation when you hit Start); export / import `.adofaitrace` files for sharing, with time-driven / angle-driven playback; angle-driven mode moves waiting and key-firing onto the worker thread, eliminating the 0–1 frame firing latency.
 - **Timing fine-tuning**: ±100 ms offset, adjustable in-game with arrow keys; automatic judge-error calibration (closed-loop, cancels speed-section offsets).
 - **Key filtering**: blacklist / whitelist, independent sync (KeyCode) and async (VK code) filters; passes through the 4 special keys the game hard-blocks (PrintScreen / F12 / LAlt / Super).
 - **Extras**: auto keypress on death, GC pause suppression during play, out-of-focus guard, macro status badge (HIT / VIRT / NT / SI) with on-screen virtual keys, English/Chinese UI.
@@ -48,7 +50,7 @@
 **Prerequisites**: ADOFAI installed, [UnityModManager](https://www.nexusmods.com/site/mods/21) (≥ 0.27.0).
 
 1. Download the archive from [Releases](https://github.com/adofaiex/ADOFAIMacro/releases) and install via UMM, or manually extract it into the game's `Mods/ADOFAIMacro/` folder.
-   - The folder should contain: `ADOFAIMacro.dll`, `InputSystem.dll`, `TechniqueSimulator.dll`, and `Localization/` (zh-CN / en-US).
+   - The folder should contain: `ADOFAIMacro.dll`, `Info.json`, `InputSystem.dll`, `TechniqueSimulator.dll`, `System.Memory.dll`, and `Localization/` (zh-CN / en-US).
 2. Launch the game, open the UMM mod window, and enable **ADOFAIMacro**.
 3. In the **Macro** tab, check **Enable Macro**.
 4. The defaults (key simulation off = direct judge) will auto-play the level. If hits feel consistently early/late, adjust **Offset (ms)** in the **Offset Settings** tab, or tap <kbd>←</kbd>/<kbd>→</kbd> in-game.
@@ -245,10 +247,11 @@ When filing an issue, please include: game version, mod version, key settings sc
 
 ## Building (Developers)
 
-- Environment: Visual Studio 2022 or newer (with MSBuild), .NET Framework 4.8.1, C# preview.
-- C# side: `ADOFAIMacro/ADOFAIMacro-Dev.csproj` is an SDK-style project (NuGet via `PackageReference`, restored automatically); game assemblies are referenced through the `$(GameManaged)` property pointing at your local ADOFAI install — you need the game's `Assembly-CSharp.dll`, `UnityEngine*.dll`, `SkyHook.Unity.dll`, `UnityModManager.dll`, plus `Newtonsoft.Json.dll` (used by the localization system). Just build Release with MSBuild.
-- Native side: run `cmd /c build_cpp.bat` at the repo root to build both C++ projects (`TechniqueSimulator` / `InputSystem`, each Debug + Release). **After changing native code you must fully rebuild (`/t:Rebuild`) — incremental builds may pick up stale artifacts.**
-- Deploy to `Mods/ADOFAIMacro/`: `ADOFAIMacro.dll` + `Localization/` + `InputSystem.dll` + `TechniqueSimulator.dll`.
+- Environment: .NET SDK 10 (bundles a C# 14 Roslyn), .NET Framework 4.8.1, C# preview; Rust stable (Release only, builds the `TriggerRs` trigger kernel).
+- C# side: `ADOFAIMacro/ADOFAIMacro-Dev.csproj` is an SDK-style project (NuGet via `PackageReference`, restored automatically); game assemblies are referenced through the `$(GameManaged)` property pointing at your local ADOFAI install — you need the game's `Assembly-CSharp.dll`, `UnityEngine*.dll`, `SkyHook.Unity.dll`, `UnityModManager.dll`, plus `Newtonsoft.Json.dll` (used by the localization system). Either `dotnet build -c Release` or MSBuild works.
+- Native side: run `cmd /c build_cpp.bat` at the repo root to build both C++ projects (`TechniqueSimulator` / `InputSystem`, each Debug + Release). **After changing native code you must fully rebuild (`/t:Rebuild`) — incremental builds may pick up stale artifacts.** CI has no v145 C++ toolchain and falls back to the checked-in `native/prebuilt/` binaries.
+- Rust trigger kernel: Release builds run `cargo build --release` automatically (path overridable with `-p:CargoExe=`); the resulting `macro_trigger.dll` is embedded into the main DLL, falling back to an existing artifact when cargo is unavailable.
+- Deploy to `Mods/ADOFAIMacro/`: `ADOFAIMacro.dll` + `Info.json` + `Localization/` + `InputSystem.dll` + `TechniqueSimulator.dll` + `System.Memory.dll`. `out/Release/` is the single source of truth for the package layout.
 
 ---
 
@@ -259,6 +262,9 @@ ADOFAIMacro/                    # C# mod (namespaces mirror directories)
 ├─ Core/
 │  ├─ Main.cs                   # Entry point: mod lifecycle, DLL loading, tamper detection
 │  ├─ Patches.cs                # All Harmony patches (input chain, judge-error feedback, special-key passthrough…)
+│  ├─ MacroPatch.cs / MacroPatchHub.cs  # Multi-version Harmony adaptation (patch guards + mounting)
+│  ├─ GuardFactory.cs           # IL guard code generation
+│  ├─ GameVersion.cs            # Game version detection
 │  └─ GameNotifier.cs           # In-game messages via the game's native notification bar
 ├─ Settings/Settings.cs         # Settings + UMM panel UI (all tabs)
 ├─ UI/
@@ -277,6 +283,9 @@ ADOFAIMacro/                    # C# mod (namespaces mirror directories)
 │  ├─ EventBuilder.cs           # Key event assembly
 │  ├─ ConfigParser.cs           # Order / duration / key string parsing
 │  ├─ KeyWorker.cs              # High-priority key-firing thread (time anchors)
+│  ├─ AngleAsyncDriver.cs       # Angle-driven: waiting and key-firing moved to the worker thread
+│  ├─ TriggerRsHost.cs          # Rust trigger kernel host (FFI + C# fallback)
+│  ├─ EmbeddedNative.cs         # Runtime extraction + LoadLibrary of embedded native DLLs
 │  ├─ Clock.cs / Lifecycle.cs   # Clock & lifecycle
 │  ├─ TechniqueSimulator.cs     # Native ABI wrapper (struct layout must match the C++ side exactly)
 │  ├─ TraceFile.cs / TracePlayer.cs  # Trace cache (.adotr) and trace player (.adofaitrace import/export)
@@ -293,8 +302,11 @@ ADOFAIMacro/                    # C# mod (namespaces mirror directories)
    └─ BaseSelect.cs             # Platform selection
 TechniqueSimulator/             # C++ technique algorithm (greedy online slicing + beam-search offline solver)
 InputSystem/                    # C++ low-level input injection (NtInject / NtSendInput)
+TriggerRs/                      # Rust trigger kernel (cdylib, embedded into the main DLL)
+native/prebuilt/                # Prebuilt native DLLs for CI (runner has no v145 C++ toolchain)
 build_cpp.bat                   # One-click build for both native projects
 tools/                          # Offline evaluation / regression tooling
+.github/workflows/build.yml     # CI: build → package → tag-triggered release
 ```
 
 ---

@@ -2,8 +2,10 @@
 
 [![License](https://img.shields.io/github/license/adofaiex/ADOFAIMacro?color=blue)](LICENSE.txt)
 [![Downloads](https://img.shields.io/github/downloads/adofaiex/ADOFAIMacro/total)](https://github.com/adofaiex/ADOFAIMacro/releases)
+[![Build](https://github.com/adofaiex/ADOFAIMacro/actions/workflows/build.yml/badge.svg)](https://github.com/adofaiex/ADOFAIMacro/actions/workflows/build.yml)
 [![C# 14.0](https://img.shields.io/badge/C%23-14.0-239120?logo=csharp&logoColor=white)](https://learn.microsoft.com/dotnet/csharp/)
 [![.NET Framework 4.8.1](https://img.shields.io/badge/.NET%20Framework-4.8.1-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/download/dotnet-framework)
+[![Rust](https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 [English README](README.en.md)
 
@@ -35,8 +37,8 @@
 
 - **自动触发**：谱面时间戳 → 高精度定时按键；双缓冲时间锚点同步主线程与工作线程，无锁零等待。
 - **四种输入路径**：直接判定 / SendInput / SkyHook 底层注入（NtInject / NtSendInput）/ 虚拟异步键盘直喂（跳过系统注入，亚微秒抖动）。
-- **手法模拟**：左右手交替、BPM 阈值自动细分时间片（单手多指连打）、可配置按键 / 顺序 / 按压时长（多音片重音"强弱拍"）、变速分段覆盖、每关独立配置；核心算法在 C++ 原生 DLL 中运行，离线求解 + 轨迹缓存。
-- **轨迹播放器**：关卡加载期即求解并缓存轨迹（进图零计算）；支持导出 / 导入 `.adofaitrace` 分享，时间驱动 / 角度驱动两种回放方式。
+- **手法模拟**：左右手交替、BPM 阈值自动细分时间片（单手多指连打）、可配置按键 / 顺序 / 按压时长（多音片重音"强弱拍"）、变速分段覆盖、每关独立配置；核心算法在 C++ 原生 DLL 中运行，离线求解 + 轨迹缓存，另有 Rust 触发内核可选加速（内嵌在主 DLL 中，无需额外分发）。
+- **轨迹播放器**：关卡加载期即求解并缓存轨迹（进图零计算）；支持导出 / 导入 `.adofaitrace` 分享，时间驱动 / 角度驱动两种回放方式；角度驱动把等待与发键搬到工作线程，消除 0~1 帧发键延迟。
 - **时间微调**：±100 ms 偏移，游戏内方向键实时调节；判定误差自动校准（闭环，自动消除变速段偏移）。
 - **按键过滤**：黑 / 白名单，同步（KeyCode）与异步（VK 码）独立过滤；放行游戏硬编码屏蔽的 4 个特殊键（PrintScreen / F12 / LAlt / Super）。
 - **其他**：死亡后自动按键、游玩期 GC 停顿抑制、窗口失焦拦截、宏状态角标（HIT / VIRT / NT / SI）与虚拟按键屏显、中英双语 UI。
@@ -48,7 +50,7 @@
 **前置**：已安装 ADOFAI 和 [UnityModManager](https://www.nexusmods.com/site/mods/21)（≥ 0.27.0）。
 
 1. 从 [Releases](https://github.com/adofaiex/ADOFAIMacro/releases) 下载压缩包，用 UMM 安装；或手动解压到游戏的 `Mods/ADOFAIMacro/` 目录。
-   - 目录内应包含：`ADOFAIMacro.dll`、`InputSystem.dll`、`TechniqueSimulator.dll`、`Localization/`（zh-CN / en-US）。
+   - 目录内应包含：`ADOFAIMacro.dll`、`Info.json`、`InputSystem.dll`、`TechniqueSimulator.dll`、`System.Memory.dll`、`Localization/`（zh-CN / en-US）。
 2. 启动游戏，打开 UMM 模组窗口，启用 **ADOFAIMacro**。
 3. 「宏」选项卡 → 勾选 **启用宏**。
 4. 默认配置（按键模拟关闭 = 直接判定）即可自动过谱；判定整体偏早/偏晚时，到「延迟设置」调整 **延迟 (ms)**，或游戏内按 <kbd>←</kbd>/<kbd>→</kbd> 微调。
@@ -245,10 +247,11 @@
 
 ## 构建（开发者）
 
-- 环境：Visual Studio 2022 或更高（含 MSBuild），.NET Framework 4.8.1，C# preview。
-- C# 侧：`ADOFAIMacro/ADOFAIMacro-Dev.csproj` 已是 SDK 风格项目（NuGet 走 `PackageReference`，自动还原）；游戏程序集通过 `$(GameManaged)` 属性引用本机 ADOFAI 安装目录——需要游戏自带的 `Assembly-CSharp.dll`、`UnityEngine*.dll`、`SkyHook.Unity.dll`、`UnityModManager.dll`、`Newtonsoft.Json.dll`。MSBuild 编译 Release 即可。
-- 原生侧：仓库根目录 `cmd /c build_cpp.bat` 一键构建两个 C++ 工程（`TechniqueSimulator` / `InputSystem`，各 Debug + Release）。**改动原生代码后必须全量重建（`/t:Rebuild`），增量构建可能吃旧产物。**
-- 部署产物到 `Mods/ADOFAIMacro/`：`ADOFAIMacro.dll` + `Localization/` + `InputSystem.dll` + `TechniqueSimulator.dll`。
+- 环境：.NET SDK 10（自带 C# 14 Roslyn），.NET Framework 4.8.1，C# preview；Rust stable（仅 Release 需要，编译 `TriggerRs` 触发内核）。
+- C# 侧：`ADOFAIMacro/ADOFAIMacro-Dev.csproj` 是 SDK 风格项目（NuGet 走 `PackageReference`，自动还原）；游戏程序集通过 `$(GameManaged)` 属性引用本机 ADOFAI 安装目录——需要游戏自带的 `Assembly-CSharp.dll`、`UnityEngine*.dll`、`SkyHook.Unity.dll`、`UnityModManager.dll`、`Newtonsoft.Json.dll`。`dotnet build -c Release` 或 MSBuild 均可。
+- 原生侧：仓库根目录 `cmd /c build_cpp.bat` 一键构建两个 C++ 工程（`TechniqueSimulator` / `InputSystem`，各 Debug + Release）。**改动原生代码后必须全量重建（`/t:Rebuild`），增量构建可能吃旧产物。** CI 环境没有 v145 C++ 工具链，会自动回退到入库的 `native/prebuilt/` 二进制。
+- Rust 触发内核：Release 构建会自动跑 `cargo build --release`（路径可用 `-p:CargoExe=` 覆盖），产物 `macro_trigger.dll` 作为嵌入资源打进主 DLL；cargo 不可用时会回退到既有产物。
+- 部署产物到 `Mods/ADOFAIMacro/`：`ADOFAIMacro.dll` + `Info.json` + `Localization/` + `InputSystem.dll` + `TechniqueSimulator.dll` + `System.Memory.dll`。`out/Release/` 是打包布局的单一来源。
 
 ---
 
@@ -259,6 +262,9 @@ ADOFAIMacro/                    # C# 模组（命名空间与目录一一对齐�
 ├─ Core/
 │  ├─ Main.cs                   # 入口：模组生命周期、DLL 加载、防篡改检测
 │  ├─ Patches.cs                # 全部 Harmony 补丁（输入链路、判定误差回灌、特殊键放行等）
+│  ├─ MacroPatch.cs / MacroPatchHub.cs  # Harmony 多版本适配体系（补丁守卫 + 挂载）
+│  ├─ GuardFactory.cs           # IL 守卫代码生成
+│  ├─ GameVersion.cs            # 游戏版本探测
 │  └─ GameNotifier.cs           # 借用游戏原生通知栏的游戏内消息
 ├─ Settings/Settings.cs         # 设置定义 + UMM 面板 UI（各选项卡）
 ├─ UI/
@@ -277,6 +283,9 @@ ADOFAIMacro/                    # C# 模组（命名空间与目录一一对齐�
 │  ├─ EventBuilder.cs           # 按键事件装配
 │  ├─ ConfigParser.cs           # 顺序/时长/按键字符串解析
 │  ├─ KeyWorker.cs              # 高优先级发键线程（时间锚点）
+│  ├─ AngleAsyncDriver.cs       # 角度驱动：等待与发键搬到工作线程
+│  ├─ TriggerRsHost.cs          # Rust 触发内核宿主（FFI + C# 回退）
+│  ├─ EmbeddedNative.cs         # 嵌入的原生 DLL 运行期解压 + LoadLibrary
 │  ├─ Clock.cs / Lifecycle.cs   # 时钟与生命周期
 │  ├─ TechniqueSimulator.cs     # 原生 ABI 封装（结构体布局与 C++ 侧严格一致）
 │  ├─ TraceFile.cs / TracePlayer.cs  # 轨迹缓存（.adotr）与轨迹播放器（.adofaitrace 导入导出）
@@ -293,8 +302,11 @@ ADOFAIMacro/                    # C# 模组（命名空间与目录一一对齐�
    └─ BaseSelect.cs             # 平台选择
 TechniqueSimulator/             # C++ 手法算法（贪心在线分片 + 束搜索离线求解）
 InputSystem/                    # C++ 底层输入注入（NtInject / NtSendInput）
+TriggerRs/                      # Rust 触发内核（cdylib，嵌入主 DLL 分发）
+native/prebuilt/                # CI 用预编译原生 DLL（runner 无 v145 C++ 工具链）
 build_cpp.bat                   # 一键构建两个原生工程
 tools/                          # 离线评测 / 回归测试工装
+.github/workflows/build.yml     # CI：build → package → tag 触发 release
 ```
 
 ---
