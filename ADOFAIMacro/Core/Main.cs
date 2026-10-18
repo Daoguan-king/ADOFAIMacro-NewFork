@@ -158,7 +158,11 @@ namespace ADOFAIMacro.Core
                 // EntryMethod 必须是 ADOFAIMacro.Core.Main.Load —— 命名空间与目录
                 // 对齐后 Main 在 ADOFAIMacro.Core 下，改这里必须同步改 Info.json，
                 // 否则 mod 会拒绝加载自己（表现为「双击闪退」）。
-                if (modEntry.Info.Version != "1.3.0" ||
+                // 这里的期望值必须与 Info.json 的 Version 完全一致（发版时一起改）。
+                // alpha20 发布时漏改，仍是 "1.3.0"，导致 Release 版启动即命中本分支
+                // → Application.Quit()，表现为「双击闪退」且 Player.log 只有一行
+                // "Modifying the Info.json file is NOT allowed!"。
+                if (modEntry.Info.Version != "1.4.0-alpha20" ||
                     modEntry.Info.Id != "ADOFAIMacro" ||
                     modEntry.Info.DisplayName != "ADOFAI Macro" ||
                     modEntry.Info.Author != "HitMargin" ||
