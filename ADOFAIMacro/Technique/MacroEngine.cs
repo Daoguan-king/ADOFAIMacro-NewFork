@@ -69,13 +69,13 @@ namespace ADOFAIMacro.Technique
         private static int _hitEventPoolUsed;
 
         // 复用缓冲区
-        private static readonly List<double> _evTimeRecycle = new(4096);
-        private static readonly List<int> _evPressRecycle = new(4096);
-        private static readonly List<int> _evFloorRecycle = new(4096);
+        private static readonly List<double> _evTimeRecycle = [with(4096)];
+        private static readonly List<int> _evPressRecycle = [with(4096)];
+        private static readonly List<int> _evFloorRecycle = [with(4096)];
         // 逐地板速度倍率（scrFloor.speed）：变速谱面必须按每个音符所在楼层的
         // 实际速度折算局部速率，否则快段仍按进关时的全局速度切片，换手全错。
-        private static readonly List<double> _evSpeedRecycle = new(4096);
-        private static readonly List<PieceInfo> _piecesRecycle = new(1024);
+        private static readonly List<double> _evSpeedRecycle = [with(4096)];
+        private static readonly List<PieceInfo> _piecesRecycle = [with(1024)];
 
         // ─────────────────────────────────────────────
         //  时间锚点（双缓冲）
