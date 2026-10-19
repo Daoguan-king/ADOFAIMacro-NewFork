@@ -608,7 +608,14 @@ namespace ADOFAIMacro.Core
 
             try
             {
-                foreach (AnyKeyCode anyKeyCode in RDInput.GetMainPressKeys())
+                // 游戏 2026-10-19 更新后签名变成 void GetMainPressKeys(List<AnyKeyCode> keys)：
+                // 由「返回新建 List」改为「填充调用方传入的 List」（省掉每次分配）。
+                // 这里复用线程静态缓冲，避免在每帧的 Prefix 里分配。
+                List<AnyKeyCode> pressKeys = _pressKeysBuffer ?? (_pressKeysBuffer = new List<AnyKeyCode>(16));
+                pressKeys.Clear();
+                RDInput.GetMainPressKeys(pressKeys);
+
+                foreach (AnyKeyCode anyKeyCode in pressKeys)
                 {
                     object value = anyKeyCode.value;
                     if (value is KeyCode keyCode)
@@ -646,6 +653,10 @@ namespace ADOFAIMacro.Core
 
         [ThreadStatic]
         private static int _blockedKeyCount;
+
+        // CountValidKeysPressed 的 Prefix 每帧复用，避免每次调用都分配 List。
+        [ThreadStatic]
+        private static List<AnyKeyCode> _pressKeysBuffer;
 
         private static readonly Dictionary<string, ushort> AsyncKeyVKMap = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -868,14 +879,19 @@ namespace ADOFAIMacro.Core
         // PrintScreen / F12 / Super 无绑定），直接放行；其余特殊键
         // （Escape / 暂停键 / 方向键 / 关卡选择 / CLS）一律保持原样。
         // 目标是**私有**方法 —— typeof 直引不检查可见性，Harmony 可挂私有。
+        // 游戏 2026-10-19 更新后该方法也改成了填充式：
+        //   void GetSpecialInput(List<AsyncKeyCode> keys)
+        // 方法变成 void 之后 Postfix 拿不到 __result（Harmony 会拒绝挂载：
+        // "Cannot get result from void method"），改为直接处理入参列表；
+        // ParameterTypes 必须写出该签名，否则重载消歧拿不到唯一目标。
         [MacroPatch(typeof(RDInputType_AsyncKeyboard), "GetSpecialInput", PatchType.Postfix,
-            ParameterTypes = new Type[0])]
-        public static void AsyncKeyboard_GetSpecialInput_Postfix(List<AsyncKeyCode> __result)
+            ParameterTypes = new[] { typeof(List<AsyncKeyCode>) })]
+        public static void AsyncKeyboard_GetSpecialInput_Postfix(List<AsyncKeyCode> keys)
         {
             try
             {
-                if (__result == null || __result.Count == 0) return;
-                __result.RemoveAll(k => Array.IndexOf(PassThroughKeys, k.label) >= 0);
+                if (keys == null || keys.Count == 0) return;
+                keys.RemoveAll(k => Array.IndexOf(PassThroughKeys, k.label) >= 0);
             }
             catch (Exception ex) { ReportToHub(nameof(AsyncKeyboard_GetSpecialInput_Postfix), "RDInputType_AsyncKeyboard.GetSpecialInput", ex); }
         }
