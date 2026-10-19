@@ -162,7 +162,7 @@ namespace ADOFAIMacro.Core
                 // alpha20 发布时漏改，仍是 "1.3.0"，导致 Release 版启动即命中本分支
                 // → Application.Quit()，表现为「双击闪退」且 Player.log 只有一行
                 // "Modifying the Info.json file is NOT allowed!"。
-                if (modEntry.Info.Version != "1.4.0-alpha21" ||
+                if (modEntry.Info.Version != "1.4.0-alpha22" ||
                     modEntry.Info.Id != "ADOFAIMacro" ||
                     modEntry.Info.DisplayName != "ADOFAI Macro" ||
                     modEntry.Info.Author != "HitMargin" ||
