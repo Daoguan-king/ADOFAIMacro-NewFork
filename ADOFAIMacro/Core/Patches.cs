@@ -610,10 +610,9 @@ namespace ADOFAIMacro.Core
             {
                 // 游戏 2026-10-19 更新后签名变成 void GetMainPressKeys(List<AnyKeyCode> keys)：
                 // 由「返回新建 List」改为「填充调用方传入的 List」（省掉每次分配）。
-                // 这里复用线程静态缓冲，避免在每帧的 Prefix 里分配。
-                List<AnyKeyCode> pressKeys = _pressKeysBuffer ?? (_pressKeysBuffer = new List<AnyKeyCode>(16));
-                pressKeys.Clear();
-                RDInput.GetMainPressKeys(pressKeys);
+                // 两版签名都保留：运行时按实际存在的方法走，r149 及以下用无参版，
+                // r150+ 用填充版。这里复用线程静态缓冲，避免在每帧的 Prefix 里分配。
+                List<AnyKeyCode> pressKeys = GetMainPressKeysCompat();
 
                 foreach (AnyKeyCode anyKeyCode in pressKeys)
                 {
@@ -657,6 +656,54 @@ namespace ADOFAIMacro.Core
         // CountValidKeysPressed 的 Prefix 每帧复用，避免每次调用都分配 List。
         [ThreadStatic]
         private static List<AnyKeyCode> _pressKeysBuffer;
+
+        // 跨版本兼容层：游戏 2026-10-19 把 RDInput.GetMainPressKeys 从
+        //   List<AnyKeyCode> GetMainPressKeys()
+        // 改成
+        //   void GetMainPressKeys(List<AnyKeyCode> keys)
+        // 两版 releaseNumber 都报 150，没法用版本号门控，只能运行时按方法形态分发。
+        // 反射只解析一次，之后缓存委托，热路径零反射。
+        private static Func<List<AnyKeyCode>> _getMainPressKeysLegacy;
+        private static Action<List<AnyKeyCode>> _getMainPressKeysFill;
+        private static bool _getMainPressKeysResolved;
+
+        private static List<AnyKeyCode> GetMainPressKeysCompat()
+        {
+            if (!_getMainPressKeysResolved)
+            {
+                _getMainPressKeysResolved = true;
+                try
+                {
+                    MethodInfo fill = typeof(RDInput).GetMethod("GetMainPressKeys",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                        null, new[] { typeof(List<AnyKeyCode>) }, null);
+                    if (fill != null)
+                    {
+                        _getMainPressKeysFill = (Action<List<AnyKeyCode>>)Delegate.CreateDelegate(
+                            typeof(Action<List<AnyKeyCode>>), fill);
+                    }
+                    MethodInfo legacy = typeof(RDInput).GetMethod("GetMainPressKeys",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                        null, Type.EmptyTypes, null);
+                    if (legacy != null)
+                        _getMainPressKeysLegacy = (Func<List<AnyKeyCode>>)Delegate.CreateDelegate(
+                            typeof(Func<List<AnyKeyCode>>), legacy);
+                }
+                catch (Exception ex)
+                {
+                    ReportToHub(nameof(GetMainPressKeysCompat), "RDInput.GetMainPressKeys", ex);
+                }
+            }
+
+            if (_getMainPressKeysFill != null)
+            {
+                List<AnyKeyCode> buffer = _pressKeysBuffer ?? (_pressKeysBuffer = new List<AnyKeyCode>(16));
+                buffer.Clear();
+                _getMainPressKeysFill(buffer);
+                return buffer;
+            }
+            return _getMainPressKeysLegacy?.Invoke() ?? new List<AnyKeyCode>();
+        }
 
         private static readonly Dictionary<string, ushort> AsyncKeyVKMap = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -879,13 +926,28 @@ namespace ADOFAIMacro.Core
         // PrintScreen / F12 / Super 无绑定），直接放行；其余特殊键
         // （Escape / 暂停键 / 方向键 / 关卡选择 / CLS）一律保持原样。
         // 目标是**私有**方法 —— typeof 直引不检查可见性，Harmony 可挂私有。
-        // 游戏 2026-10-19 更新后该方法也改成了填充式：
-        //   void GetSpecialInput(List<AsyncKeyCode> keys)
-        // 方法变成 void 之后 Postfix 拿不到 __result（Harmony 会拒绝挂载：
+        //
+        // 版本分叉（r149 为界）：
+        //   r149 及以下：List<AsyncKeyCode> GetSpecialInput()  —— 无参，Postfix 取 __result
+        //   r150 及以上：void GetSpecialInput(List<AsyncKeyCode> keys) —— 填充式，处理入参
+        // 两条补丁按 MinVersion/MaxVersion 互斥，只有一条会挂载。
+        [MacroPatch(typeof(RDInputType_AsyncKeyboard), "GetSpecialInput", PatchType.Postfix,
+            ParameterTypes = new Type[0], MaxVersion = 149)]
+        public static void AsyncKeyboard_GetSpecialInput_Legacy_Postfix(List<AsyncKeyCode> __result)
+        {
+            try
+            {
+                if (__result == null || __result.Count == 0) return;
+                __result.RemoveAll(k => Array.IndexOf(PassThroughKeys, k.label) >= 0);
+            }
+            catch (Exception ex) { ReportToHub(nameof(AsyncKeyboard_GetSpecialInput_Legacy_Postfix), "RDInputType_AsyncKeyboard.GetSpecialInput", ex); }
+        }
+
+        // r150+：方法变成 void 之后 Postfix 拿不到 __result（Harmony 会拒绝挂载：
         // "Cannot get result from void method"），改为直接处理入参列表；
         // ParameterTypes 必须写出该签名，否则重载消歧拿不到唯一目标。
         [MacroPatch(typeof(RDInputType_AsyncKeyboard), "GetSpecialInput", PatchType.Postfix,
-            ParameterTypes = new[] { typeof(List<AsyncKeyCode>) })]
+            ParameterTypes = new[] { typeof(List<AsyncKeyCode>) }, MinVersion = 150)]
         public static void AsyncKeyboard_GetSpecialInput_Postfix(List<AsyncKeyCode> keys)
         {
             try
