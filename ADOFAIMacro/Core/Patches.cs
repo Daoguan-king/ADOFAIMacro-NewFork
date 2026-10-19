@@ -608,7 +608,14 @@ namespace ADOFAIMacro.Core
 
             try
             {
-                foreach (AnyKeyCode anyKeyCode in RDInput.GetMainPressKeys())
+                // 游戏 2026-10-19 更新后签名变成 void GetMainPressKeys(List<AnyKeyCode> keys)：
+                // 由「返回新建 List」改为「填充调用方传入的 List」（省掉每次分配）。
+                // 这里复用线程静态缓冲，避免在每帧的 Prefix 里分配。
+                List<AnyKeyCode> pressKeys = _pressKeysBuffer ?? (_pressKeysBuffer = new List<AnyKeyCode>(16));
+                pressKeys.Clear();
+                RDInput.GetMainPressKeys(pressKeys);
+
+                foreach (AnyKeyCode anyKeyCode in pressKeys)
                 {
                     object value = anyKeyCode.value;
                     if (value is KeyCode keyCode)
@@ -646,6 +653,10 @@ namespace ADOFAIMacro.Core
 
         [ThreadStatic]
         private static int _blockedKeyCount;
+
+        // CountValidKeysPressed 的 Prefix 每帧复用，避免每次调用都分配 List。
+        [ThreadStatic]
+        private static List<AnyKeyCode> _pressKeysBuffer;
 
         private static readonly Dictionary<string, ushort> AsyncKeyVKMap = new(StringComparer.OrdinalIgnoreCase)
         {
