@@ -1,4 +1,4 @@
-﻿using ADOFAIMacro.Macro;
+using ADOFAIMacro.Macro;
 using ADOFAIMacro.Platform;
 using HarmonyLib;
 using SkyHook;
@@ -387,6 +387,9 @@ namespace ADOFAIMacro
                 return true; // 如果宏未启用，不过滤任何按键
             if (!Main.Settings.EnableKeyFilter) return true;
 
+            // 宏自己会按的键永远放行：过滤只针对玩家输入（否则白名单下宏自我失效）
+            if (Macro.Macro.IsMacroOwnKey(KeyCodeToVk(keyCode))) return true;
+
             // 需要重建位图？
             if (_keyFilterMap == null ||
                 _lastFilteredKeysString != Main.Settings.FilteredKeys ||
@@ -468,7 +471,8 @@ namespace ADOFAIMacro
 
                 int total = RDInput.mainPressCount;
                 int blocked = 0;
-                foreach (AnyKeyCode anyKeyCode in RDInput.GetMainPressKeys())
+                List<AnyKeyCode> pressKeys = GetMainPressKeysCompat();
+                foreach (AnyKeyCode anyKeyCode in pressKeys)
                 {
                     object value = anyKeyCode.value;
                     if (value is KeyCode keyCode)
@@ -492,6 +496,62 @@ namespace ADOFAIMacro
                 int num = total - blocked;
                 return num < 0 ? 0 : num;
             }
+        }
+
+        // 跨版本兼容层：游戏 2026-10-19 把 RDInput.GetMainPressKeys 从
+        //   List<AnyKeyCode> GetMainPressKeys()
+        // 改成
+        //   void GetMainPressKeys(List<AnyKeyCode> keys)
+        // 两版 releaseNumber 都报 150，没法用版本号门控，只能运行时按方法形态分发。
+        // 反射只解析一次，之后缓存委托，热路径零反射（该方法在每帧的 Transpiler 替换点里被调用）。
+        [ThreadStatic] private static List<AnyKeyCode> _pressKeysBuffer;
+        private static Func<List<AnyKeyCode>> _getMainPressKeysLegacy;
+        private static Action<List<AnyKeyCode>> _getMainPressKeysFill;
+        private static bool _getMainPressKeysResolved;
+
+        private static List<AnyKeyCode> GetMainPressKeysCompat()
+        {
+            if (!_getMainPressKeysResolved)
+            {
+                _getMainPressKeysResolved = true;
+                try
+                {
+                    MethodInfo fill = typeof(RDInput).GetMethod("GetMainPressKeys",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                        null, new[] { typeof(List<AnyKeyCode>) }, null);
+                    if (fill != null)
+                    {
+                        _getMainPressKeysFill = (Action<List<AnyKeyCode>>)Delegate.CreateDelegate(
+                            typeof(Action<List<AnyKeyCode>>), fill);
+                    }
+
+                    MethodInfo legacy = typeof(RDInput).GetMethod("GetMainPressKeys",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                        null, Type.EmptyTypes, null);
+                    if (legacy != null)
+                    {
+                        _getMainPressKeysLegacy = (Func<List<AnyKeyCode>>)Delegate.CreateDelegate(
+                            typeof(Func<List<AnyKeyCode>>), legacy);
+                    }
+
+                    if (_getMainPressKeysFill == null && _getMainPressKeysLegacy == null)
+                        Main.Mod?.Logger.Warning("[KeyFilter] RDInput.GetMainPressKeys 两个重载都未找到，按键过滤无法生效");
+                }
+                catch (Exception ex)
+                {
+                    Main.Mod?.Logger.Error("[KeyFilter] 解析 RDInput.GetMainPressKeys 失败: " + ex);
+                }
+            }
+
+            if (_getMainPressKeysFill != null)
+            {
+                List<AnyKeyCode> buffer = _pressKeysBuffer ?? (_pressKeysBuffer = new List<AnyKeyCode>(16));
+                buffer.Clear();
+                _getMainPressKeysFill(buffer);
+                return buffer;
+            }
+
+            return _getMainPressKeysLegacy?.Invoke() ?? new List<AnyKeyCode>();
         }
 
         private static HashSet<ushort> ParseAsyncKeyCodes(string keyString)
@@ -532,12 +592,24 @@ namespace ADOFAIMacro
             return result;
         }
 
+        // UnityEngine.KeyCode → Windows 虚拟键码（只为与宏的键位表比较；两者字段语义不同：
+        // KeyCode 的字母是小写 ASCII(97..122)，虚拟键码是大写(65..90)，其余值域一致）
+        private static int KeyCodeToVk(KeyCode kc)
+        {
+            int v = (int)kc;
+            if (v >= (int)KeyCode.A && v <= (int)KeyCode.Z) return v - 32;
+            return v;
+        }
+
         // 检查异步按键是否允许通过（位图优化版）
         private static bool IsAsyncKeyAllowed(ushort keyCode)
         {
             if (!Main.IsEnabled || !Main.Settings.Macro)
                 return true; // 如果宏未启用，不过滤任何按键
             if (!Main.Settings.EnableKeyFilter) return true;
+
+            // 宏自己会按的键永远放行（同 IsKeyAllowed）
+            if (Macro.Macro.IsMacroOwnKey(keyCode)) return true;
 
             // 需要重建位图？
             if (_asyncKeyFilterMap == null ||

@@ -1,4 +1,4 @@
-﻿using ADOFAIMacro.Macro;
+using ADOFAIMacro.Macro;
 using HarmonyLib;
 using SA.GoogleDoc;
 using System;
@@ -97,6 +97,9 @@ namespace ADOFAIMacro
             return attribute.IsJITOptimizerDisabled;
         }
 
+        // 与 Info.json 的 Version 字段绑定的单一来源；改版本只改这里 + Info.json。
+        private const string InfoBaseVersion = "1.3.0";
+
         private static bool OnToggle(UnityModManager.ModEntry modEntry, bool value)
         {
             if (value)
@@ -105,9 +108,18 @@ namespace ADOFAIMacro
                 // None
 
 #else
-                if (modEntry.Info.Version != "1.3.0" || modEntry.Info.Id != "ADOFAIMacro" || modEntry.Info.DisplayName != "ADOFAI Macro" || modEntry.Info.Author != "HitMargin" || modEntry.Info.AssemblyName != "ADOFAIMacro.dll" || modEntry.Info.EntryMethod != "ADOFAIMacro.Main.Load")
+                // 防篡改基线：这些常量必须与仓库里的 Info.json **逐字一致**。
+                // 改版本号时两边同时改，否则 Release 会命中下面的分支 → Application.Quit()
+                // （表现为"启用模组后立即闪退"；上游 3c16e3c 记录的就是这个坑）。
+                if (modEntry.Info.Version != InfoBaseVersion
+                    || modEntry.Info.Id != "ADOFAIMacro"
+                    || modEntry.Info.DisplayName != "ADOFAI Macro"
+                    || modEntry.Info.Author != "HitMargin"
+                    || modEntry.Info.AssemblyName != "ADOFAIMacro.dll"
+                    || modEntry.Info.EntryMethod != "ADOFAIMacro.Main.Load")
                 {
-                    Mod?.Logger.Error("Modifying the Info.json file is NOT allowed!");
+                    Mod?.Logger.Error("Modifying the Info.json file is NOT allowed! " +
+                                      $"(expected Version={InfoBaseVersion}, Id=ADOFAIMacro, Entry=ADOFAIMacro.Main.Load)");
                     Application.Quit();
                 }
                 /*
