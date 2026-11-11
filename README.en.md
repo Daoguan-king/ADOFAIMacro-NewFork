@@ -159,16 +159,32 @@ When enabled (requires **Key simulation**), the macro no longer simply rotates t
 | L/R Order | empty | See format below; empty = default rotation. |
 | L/R Ratio | `0.8,0.8` | Press-duration ratio (0 ~ 1). |
 | Speed Change Tolerance | 0 | Auto-adjusts BPM to align slices with event timing. 0 = off, 0.2 = moderate, 0.5 = aggressive. |
-| Balance multi-press across hands | off | Multi-press defaults to the main hand filling all its keys, with the rest to the other hand; on = split evenly. |
+| Balance multi-press across hands | off | off = that slice's main hand fills all its keys and the rest goes to the other hand (6 notes, 5 keys per hand → `R5 L1`); on = split evenly (6 notes → 3+3, the odd extra note to the main hand). |
 
 **Order format**: use `|` to separate groups with different key counts, and commas to separate 1-based key indices. Example `1,2 | 1,2 | 1,2,1`: one-key slices rotate keys 1 and 2; three-key slices play 1→2→1. Empty = default order.
+
+### Random offset (anti-mechanical)
+
+| Panel item | Default | Description |
+|---|---|---|
+| Random offset | off | Off = **fully deterministic**: the same settings on the same chart produce exactly the same key events every time. On = each press time is jittered by ±6 ms (about a third of a frame, still well inside the Perfect window), which feels more human both in play and in the hit-error readout. |
+| Random offset seed | 0 | Only used when the offset is on. Leave it at 0 to **derive the seed from the chart** (same chart reproduces, different charts differ); any positive integer pins the seed, and a different seed gives a different jitter sequence. |
+
+> The jitter is applied to the **event times**, the earliest possible stage: slicing, hand switching and press durations are all derived from the jittered times, so the whole chain stays consistent.
+
+### Hold rules
+
+- **One press per tile.** A midspin tile exists as two floors in the game (two halves with the same entry time); the press counter counts two, but the player presses once — so the macro presses once when entering that tile.
+- **The hold's end tile is never clicked.** Under the standard setting the end tile of a hold must not be hit, so the macro only sends a **release** there.
+- **A hold owns its key for the whole span.** Ordinary notes never reuse that key; they move to other fingers or the other hand.
+- **Back-to-back holds switch hands.** When a new hold starts right after the previous one ends (≤20 ms), the macro deterministically moves to the **other hand** and uses that hand's single-note fingering (the first entry of its L/R order) — e.g. `N7 → F → N7 → F` on a ten-key profile, instead of merging into one long press on the same key.
 
 ### Slice rules
 
 - Slice length is based on the **actual note interval**: the time gap to the next note after skipping same-time doubles/chords; cuts snap to event gaps.
 - At or below the threshold: one note per slice, single-finger tapping by that hand.
 - Above the threshold: the finger count is `n = ceil(note rate / threshold)`, where the threshold is the single-finger tap limit. Each slice is handled by one hand taking half of those `n` notes: when `n` is even, both hands take `n/2` notes alternately; when `n` is odd, the main hand takes the extra finger. If a slice has more events than that hand has keys, all its keys are used.
-- Multi-press: when one moment has more notes than a hand has keys, the main hand fills all its keys by default and the rest goes to the other hand; with **Balance multi-press across hands** enabled, notes are split evenly across both hands, with an odd extra note to the main hand.
+- Multi-press: when one moment has more notes than a hand has keys, the cluster becomes a single slice and is handed out by **Balance multi-press across hands** — off (default) lets the main hand fill all its keys with the rest going to the other hand (6 notes → `R5 L1`), on splits it evenly with an odd extra note to the main hand (6 notes → 3+3)..
 - “One moment” is detected adaptively: consecutive events with internal gaps ≤12 ms and a total span ≤35 ms count as one multi-press.
 
 ### Hold time
