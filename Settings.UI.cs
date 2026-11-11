@@ -577,11 +577,36 @@ namespace ADOFAIMacro
             c.Add(SwitchRow("tech.multi_chord_balance", TechniqueMultiChordBalance,
                 v => TechniqueMultiChordBalance = v, "tech.multi_chord_balance_desc"));
 
+            c.Add(Divider());
+            c.Add(BuildAlgorithmSection());
             c.Add(BuildHandSection(true));
             c.Add(BuildHandSection(false));
             c.Add(BuildSegmentsSection());
 
             return [Card(c.ToArray())];
+        }
+
+        // ── 算法选择 / 仿人随机化 / 随机种子 ───────────────────────
+        // 下标即算法枚举值：0=经典分片算法，1=仿人手法算法（默认）。
+        private Element BuildAlgorithmSection()
+        {
+            var seedRows = new List<object>
+            {
+                Text(LocalizationManager.Get("tech.randomize_seed"), TextStyle.Normal, WidthMax),
+                Text(LocalizationManager.Get("tech.randomize_seed_desc"), TextStyle.Secondary, WidthMax),
+                HBox(ContainerStyle.None, null, WidthMax,
+                    Fill(),
+                    StructField(TechniqueRandomizeSeed, IntFormat(0, int.MaxValue),
+                        v => TechniqueRandomizeSeed = v, Width(100), Height(24)))
+            };
+
+            return VBox(ContainerStyle.None, null, Bag(new List<object>
+            {
+                SwitchRow("tech.randomize", TechniqueRandomize, v => TechniqueRandomize = v,
+                    "tech.randomize_desc"),
+                // 随机化关闭时种子无意义：整体禁用并弱化（GUI.enabled=false）。
+                Enabled(() => TechniqueRandomize, VBox(ContainerStyle.None, null, Bag(seedRows)))
+            }));
         }
 
         private Element BuildLevelConfigSection()

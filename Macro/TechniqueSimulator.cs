@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -35,6 +35,8 @@ namespace ADOFAIMacro.Macro
         private static double _cachedSpeedChangeTolerance;
         private static int _cachedPressDurationMode;
         private static int _cachedMultiChordBalance;
+        private static int _cachedRandomizeEnabled;
+        private static int _cachedRandomizeSeed;
         private static Settings.TechniqueSegment[]? _cachedSegments;
 
         // ─────────────────────────────────────────────
@@ -121,6 +123,12 @@ namespace ADOFAIMacro.Macro
             public int PressDurationMode;
             // 多押按键均分：0=关，1=开
             public int MultiChordBalance;
+
+            // ── 追加字段（与 C++ TechniqueConfig 尾部一一对应，sizeof 144 → 152）──
+            // 随机化开关：0=确定性（默认），1=按下时刻 ±6ms 微抖动
+            public int RandomizeEnabled;
+            // 随机化种子：0=按谱面派生
+            public int RandomizeSeed;
         }
 
         // ─────────────────────────────────────────────
@@ -181,6 +189,9 @@ namespace ADOFAIMacro.Macro
             public Settings.TechniqueSegment[] Segments = [];
             public int PressDurationMode;
             public int MultiChordBalance;
+            // 随机化开关与种子（默认关闭、确定性）；种子 0 = 按谱面派生
+            public int RandomizeEnabled;
+            public int RandomizeSeed;
         }
 
         // ─────────────────────────────────────────────
@@ -204,6 +215,8 @@ namespace ADOFAIMacro.Macro
             _cachedSegments = CloneSegments(snapshot.Segments);
             _cachedPressDurationMode = snapshot.PressDurationMode;
             _cachedMultiChordBalance = snapshot.MultiChordBalance;
+            _cachedRandomizeEnabled = snapshot.RandomizeEnabled;
+            _cachedRandomizeSeed = snapshot.RandomizeSeed;
         }
 
         private static int[][]? CloneOrders(int[][]? orders)
@@ -435,7 +448,9 @@ namespace ADOFAIMacro.Macro
                 SegmentCount = _cachedSegments?.Length ?? 0,
                 SpeedChangeTolerance = _cachedSpeedChangeTolerance,
                 PressDurationMode = _cachedPressDurationMode,
-                MultiChordBalance = _cachedMultiChordBalance
+                MultiChordBalance = _cachedMultiChordBalance,
+                RandomizeEnabled = _cachedRandomizeEnabled,
+                RandomizeSeed = _cachedRandomizeSeed
             };
 
             try

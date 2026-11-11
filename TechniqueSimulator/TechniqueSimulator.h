@@ -86,6 +86,12 @@ struct TechniqueConfig {
     int    pressDurationMode;
     // 多押按键均分：0=关（主手取满 maxK 后余数给另一手），1=开（对半均分到两手）
     int    multiChordBalance;
+
+    // ── 追加字段（只能用追加的方式扩 ABI；sizeof 144 → 152）────────────
+    // 仿人随机化：0=完全确定性（默认），1=按下时刻 ±6ms 微抖动（同谱面同 seed 可复现）
+    int    randomizeEnabled;
+    // 抖动种子：0 时按谱面派生
+    int    randomizeSeed;
 };
 
 #pragma pack(pop)

@@ -381,6 +381,22 @@ namespace ADOFAIMacro
             set { if (_techniqueMultiChordBalance == value) return; _techniqueMultiChordBalance = value; }
         }
 
+        // ── 随机偏移：true 时按下时刻做 ±6ms 微抖动（同谱面同种子可复现） ──
+        private bool _techniqueRandomize = false;
+        public bool TechniqueRandomize
+        {
+            get => _techniqueRandomize;
+            set { if (_techniqueRandomize == value) return; _techniqueRandomize = value; }
+        }
+
+        // ── 随机化种子：0=按谱面派生（保证同一张谱可复现） ──
+        private int _techniqueRandomizeSeed = 0;
+        public int TechniqueRandomizeSeed
+        {
+            get => _techniqueRandomizeSeed;
+            set => _techniqueRandomizeSeed = value;
+        }
+
         // ── 配置列表 ──────────────────────────────────
         private List<TechniqueProfile> _techniqueProfiles = [];
         public List<TechniqueProfile> TechniqueProfiles

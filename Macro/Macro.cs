@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -158,6 +158,25 @@ namespace ADOFAIMacro.Macro
         // ─────────────────────────────────────────────
         private static byte[] _techLeftKeys = [];
         private static byte[] _techRightKeys = [];
+
+        /// <summary>
+        /// 该虚拟键码是否属于「宏自己会按的键」：手法左右手键位 + 简单宏键位 + 死亡键。
+        /// 按键过滤的语义是**过滤玩家输入，而不是过滤宏的输出**；白名单模式下若把宏自己的键
+        /// 也拦掉，宏会完全失效（注入键经 LL 钩子回流后会进过滤判定）。
+        /// </summary>
+        internal static bool IsMacroOwnKey(int vk)
+        {
+            if (vk <= 0) return false;
+            byte[] left = _techLeftKeys;
+            for (int i = 0; i < left.Length; i++) if (left[i] == vk) return true;
+            byte[] right = _techRightKeys;
+            for (int i = 0; i < right.Length; i++) if (right[i] == vk) return true;
+            byte[] simple = _keyCodesSnapshot;
+            if (simple != null)
+                for (int i = 0; i < simple.Length; i++) if (simple[i] == vk) return true;
+            if (Main.Settings.EnableDeathKey && Main.Settings.DeathKeyCode == vk) return true;
+            return false;
+        }
         private static readonly int[][][] _techKeyOrders = [[], []];
         private static readonly double[][] _techPressDur = [[], []];
         private static List<Settings.TechniqueSegment>? _currentSegments;
@@ -999,7 +1018,7 @@ namespace ADOFAIMacro.Macro
             if (_cachedSkyHookMode)
             {
                 int r = AsyncInputManager.DirectPushKey(keyCode, isDown);
-                if (r != 0) Log($"[Macro-Worker] PushKeyEvent 失败 result={r} key=0x{keyCode:X2}");
+                if (r != 0) LogImportant($"PushKeyEvent 失败 result={r} key=0x{keyCode:X2}");
                 Log($"[Macro-Worker] SkyHook direct key=0x{keyCode:X2} down={isDown}");
             }
             else
@@ -1061,27 +1080,78 @@ namespace ADOFAIMacro.Macro
             evFloor.Clear();
             evSpeed?.Clear();
 
-            for (int i = 0; i < floors.Length - 1; i++)
+            int n = floors.Length;
+
+            // 「砖」= entryTime 相同的连续 floor。中旋在游戏里被拆成两半（同一块砖两个 floor），
+            // 按键数统计按两块算，但玩家只按 1 次 —— 所以**进砖只产生一次按下**。
+            int TileStart(int idx)
+            {
+                int s = idx;
+                while (s > 0 && Math.Abs(floors[s].entryTime - floors[s - 1].entryTime) < 1e-6) s--;
+                return s;
+            }
+            // 这块砖是否被按住；返回该砖上的 holdLength（未按住返回 -1）。
+            // holdLength 在按住期间逐砖递减，**重新变大**说明是新的一段长按（0 停顿换手）。
+            double TileHold(int tileStart)
+            {
+                double best = -1.0;
+                for (int j = tileStart; j < n; j++)
+                {
+                    if (Math.Abs(floors[j].entryTime - floors[tileStart].entryTime) > 1e-6) break;
+                    if (floors[j].holdLength > best) best = floors[j].holdLength;
+                }
+                return best;
+            }
+
+            bool holdOn = false;
+            double prevHold = double.MaxValue;
+            for (int i = 0; i < n - 1; i++)
             {
                 var fl = floors[i];
-                if (!IsPlayableFloor(fl)) continue;
-
                 var nf = floors[i + 1];
-                double t = nf?.entryTime ?? double.MaxValue;
+                if (nf == null) continue;
+                int nfTile = TileStart(i + 1);
+                if (nfTile != i + 1) continue;      // 同一块砖的后半：不产生按下
+                double t = nf.entryTime;
 
-                if (sim && fl.holdLength > -1 && nf != null && nf.holdLength == -1)
+                double curHold = sim ? TileHold(nfTile) : -1.0;
+                // 同一段长按的延续：仍被按住且 holdLength 比上一砖小
+                bool continues = holdOn && curHold > -1.0 && curHold < prevHold - 1e-9;
+
+                bool justReleased = false;
+                if (holdOn && !continues)
                 {
+                    // 上一段长按在这里结束（可能是“0 停顿”紧接着下一段）
                     evTime.Add(t); evPress.Add(-1); evFloor.Add(i); evSpeed?.Add(fl.speed);
+                    holdOn = false;
+                    prevHold = double.MaxValue;
+                    justReleased = true;
+                }
+
+                if (curHold > -1.0)
+                {
+                    if (!continues)
+                    {
+                        // 进入一段新长按：整段只发一个头（这一块砖不另外产生普通按下）
+                        evTime.Add(t); evPress.Add(2); evFloor.Add(i); evSpeed?.Add(fl.speed);
+                        holdOn = true;
+                    }
+                    prevHold = curHold;
                     continue;
                 }
 
-                bool isHoldHead = sim && nf != null && nf.holdLength > -1;
+                // 这一块砖是长按终点砖：标准设置不允许点击终点砖 → 只发释放，不发按下
+                if (justReleased) continue;
+
+                // 普通按下：保持原判定（源砖可点），非长按谱面的时间语义不变
+                if (!IsPlayableFloor(fl)) continue;
                 evTime.Add(t);
-                evPress.Add(isHoldHead ? 2 : 1);
+                evPress.Add(1);
                 evFloor.Add(i);
                 evSpeed?.Add(fl.speed);
             }
         }
+
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void BuildHitEvents()
@@ -1139,7 +1209,7 @@ namespace ADOFAIMacro.Macro
                 _hitEventCount = 0;
             }
 
-            Log($"[Macro-Main] BuildHitEvents 完成，共 {_hitEventCount} 个事件");
+            LogImportant($"手法事件构建完成，共 {_hitEventCount} 个事件");
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1410,6 +1480,8 @@ namespace ADOFAIMacro.Macro
                         Segments = segments,
                         PressDurationMode = Main.Settings.TechniqueLegacyPressDuration ? 1 : 0,
                         MultiChordBalance = Main.Settings.TechniqueMultiChordBalance ? 1 : 0,
+                        RandomizeEnabled = Main.Settings.TechniqueRandomize ? 1 : 0,
+                        RandomizeSeed = Main.Settings.TechniqueRandomizeSeed,
                     });
 
                     if (TechniqueSimulator.BuildHitEvents(
@@ -1420,7 +1492,7 @@ namespace ADOFAIMacro.Macro
                     {
                         _hitEvents = nativeEvents;
                         _hitEventCount = nativeEvents!.Length;
-                        Log($"[Macro-Main] C++ 手法模拟（原生分段）完成：{_hitEventCount} 事件");
+                        LogImportant($"手法模拟完成：{_hitEventCount} 事件（原生分段）");
                         return;
                     }
                 }
@@ -1941,7 +2013,7 @@ namespace ADOFAIMacro.Macro
                 AsyncInputManager.Start();
                 if (!AsyncInputManager.IsInitialized)
                 {
-                    Log("[Macro-Main] SkyHook 启动失败，回退到 SendInput");
+                    LogImportant("SkyHook 启动失败，已回退 SendInput（会引入系统注入抖动）");
                     Main.Settings.SkyHookMode = false; return;
                 }
                 skyHookInitialized = true;
@@ -1990,6 +2062,16 @@ namespace ADOFAIMacro.Macro
         // ─────────────────────────────────────────────
         //  日志
         // ─────────────────────────────────────────────
+        /// <summary>
+        /// 关键诊断：Release 也会输出（走 UMM logger）。只用于进关/失败等低频路径，
+        /// **绝不要放进热路径**（每条都会写 Player.log）。用于替代被 [Conditional("DEBUG")]
+        /// 整体剥除的 Log()，避免线上问题变成"日志黑洞、只能靠猜"。
+        /// </summary>
+        internal static void LogImportant(string message)
+        {
+            Main.Mod?.Logger.Log("[Macro] " + message);
+        }
+
         [System.Diagnostics.Conditional("DEBUG")]
         public static void Log(string message)
         {

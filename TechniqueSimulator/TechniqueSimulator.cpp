@@ -41,6 +41,12 @@ static const double kSameKeyReleaseGap = 1.0e-2;
 // 分片死循环保护：片数上限 = 事件数 × 该倍数
 static const size_t kMaxPiecesPerEvent = 64;
 
+// 仿人随机化：按下时刻抖动幅度（±6ms，约 1/3 帧，仍在 Perfect 判定窗内）
+static const double kRandomPressJitter = 6.0e-3;
+
+// 两段长按“0 停顿”相接的判定窗口：上一段释放与本段按下相差小于它，就要换手/换键
+static const double kHoldHandoverGap = 2.0e-2;
+
 static int ChordClusterSize(const vector<double>& evTime, int idx)
 {
     int n = (int)evTime.size();
@@ -531,7 +537,8 @@ static int BuildPieces(const vector<double>& evTime, const vector<int>& evFloor,
         // 关闭则沿用“主手取满 maxK，余数交给另一手”的旧行为。
         {
             int chordN = ChordClusterSize(evTime, nowD);
-            if (g_config.multiChordBalance && chordN > maxK) {
+            // 分簇路径与开关无关：开关只决定“怎么分配”，绝不能短路掉分簇（旧写法会丢音）
+            if (chordN > maxK) {
                 int capMax = (ec.leftKeyCount > ec.rightKeyCount) ? ec.leftKeyCount : ec.rightKeyCount;
                 if (capMax < 1) capMax = 1;
                 int p = (chordN + capMax - 1) / capMax;   // 需要的片数
@@ -617,6 +624,11 @@ static void EmitPieceEvents(const vector<PieceInfo>& pieces,
 {
     bool          activeHold = false;
     unsigned char activeHoldKey = 0;
+    // 上一段长按的键与释放时刻：两段长按“0 停顿”相接时必须换手/换键，
+    // 否则同一键在同一时刻先松后按会被游戏合并成一次长按（实测表现为中旋长按判负）。
+    unsigned char lastHoldKey = 0;
+    double        lastHoldRelTime = -1e9;
+    int           lastHoldHand = -1;      // 上一段长按用哪只手（0=左 1=右），用于 0 停顿换手
     int           lastSegIdxEvent = -2;
 
     for (size_t pcnt = 0; pcnt + 1 < pieces.size(); pcnt++) {
@@ -633,7 +645,26 @@ static void EmitPieceEvents(const vector<PieceInfo>& pieces,
             int capMax = (lk > rk) ? lk : rk; if (capMax < 1) capMax = 1;
             int p = (cur.evCount + capMax - 1) / capMax; if (p < 2) p = 2;
             int mainH = (g_config.handPreference == 0) ? 0 : 1;
-            ComputeChordSplitSizes(cur.evCount, p, cur.hand, mainH, splitSizes);
+            if (g_config.multiChordBalance) {
+                // 开：整簇对半均分到两手（各片事件数相差 ≤1，单数时多的一键给主手）
+                ComputeChordSplitSizes(cur.evCount, p, cur.hand, mainH, splitSizes);
+            }
+            else {
+                // 关：主手先取满自己全部按键，余数交给另一手（6 押 5 键 → 5+1）
+                int firstK = (cur.hand == 0) ? lk : rk;
+                int otherK = (cur.hand == 0) ? rk : lk;
+                if (firstK < 1) firstK = 1;
+                if (otherK < 1) otherK = 1;
+                int remain = cur.evCount;
+                bool first = true;
+                while (remain > 0) {
+                    int cap = first ? firstK : otherK;
+                    int take = (remain < cap) ? remain : cap;
+                    splitSizes.push_back(take);
+                    remain -= take;
+                    first = !first;
+                }
+            }
         }
 
         for (int i = 0; i < cur.evCount; i++) {
@@ -645,6 +676,8 @@ static void EmitPieceEvents(const vector<PieceInfo>& pieces,
             if (press == -1) {
                 if (activeHold) {
                     output.push_back(MakeRelease(t, activeHoldKey, TRUE));
+                    lastHoldKey = activeHoldKey;      // 供“0 停顿换手”判断
+                    lastHoldRelTime = t;
                     activeHold = false;
                     activeHoldKey = 0;
                 }
@@ -683,6 +716,11 @@ static void EmitPieceEvents(const vector<PieceInfo>& pieces,
                 }
             }
 
+            // 0 停顿换手：上一段长按刚结束（≤20ms）→ 这一段确定地换到**另一只手**，
+            // 并且固定用该手的 1 号键（用户期望的样子是 Q ↔ 4 来回切，而不是乱跳到 2/3 号键）。
+            bool handover = (lastHoldHand >= 0) && (t - lastHoldRelTime < kHoldHandoverGap);
+            if (handover) eh = 1 - lastHoldHand;
+
             const unsigned char* keys = (eh == 0) ? ec.leftKeys : ec.rightKeys;
             int                  keyCount = (eh == 0) ? ec.leftKeyCount : ec.rightKeyCount;
             int** orders = (eh == 0) ? ec.leftKeyOrders : ec.rightKeyOrders;
@@ -700,6 +738,18 @@ static void EmitPieceEvents(const vector<PieceInfo>& pieces,
             else
                 ki = ei % keyCount;
             ki = max(0, min(ki, keyCount - 1));
+            // 换手时用**目标手的单音指法**（orders[0] 的第一个键），而不是 0 号键：
+            // 用户档里"1 音"的手指是 orders[0]（例：自用档 左=F、右=N7），取 0 号键会变成 A / N0。
+            // 长按/长按终点后的那一个音本来就只有一次按下，按 1 音指法给键才符合人手的换手习惯。
+            if (handover)
+            {
+                int oi0 = 0;
+                if (orders && orderCounts > 0 && orders[0] && orderLens[0] > 0)
+                    ki = orders[0][0];
+                else
+                    ki = 0;
+                ki = max(0, min(ki, keyCount - 1));
+            }
 
             unsigned char kc = keys[ki];
             double        ratio = (pressTimes && ki < keyCount) ? pressTimes[ki] : 0.8;
@@ -708,9 +758,28 @@ static void EmitPieceEvents(const vector<PieceInfo>& pieces,
             // 若已有长按键且新事件是 hold 头，先强制释放
             if (isHoldHead && activeHold) {
                 output.push_back(MakeRelease(t - 0.000001, activeHoldKey, TRUE));
+                lastHoldKey = activeHoldKey;
+                lastHoldRelTime = t;
                 activeHold = false;
                 activeHoldKey = 0;
             }
+
+            // 0 停顿换手：与上一段长按几乎同时、且落在同一个键上 → 换到另一只手的同序号键。
+            // 长按头与普通音都要处理：普通音若沿用刚结束的长按键，会被那条释放立刻松开（0ms 按压）。
+            if (lastHoldKey != 0 && kc == lastHoldKey &&
+                t - lastHoldRelTime < kHoldHandoverGap)
+            {
+                const unsigned char* otherKeys = (eh == 0) ? ec.rightKeys : ec.leftKeys;
+                int otherCount = (eh == 0) ? ec.rightKeyCount : ec.leftKeyCount;
+                unsigned char alt = 0;
+                if (otherKeys && otherCount > 0)
+                    alt = otherKeys[min(ki, otherCount - 1)];
+                else if (keyCount > 1)
+                    alt = keys[(ki + 1) % keyCount];   // 只有一只手可用时，同手换下一个键
+                if (alt && alt != kc) kc = alt;
+            }
+
+            if (isHoldHead) lastHoldHand = eh;   // 记录本段长按实际用的手
 
             // 按下事件
             HitEvent pressEv = {};
@@ -808,6 +877,34 @@ HitEvent* BuildTechniqueHitEventsEx(
         vector<double> evTime(entryTimes, entryTimes + eventCount);
         vector<int>    evPress(pressTypes, pressTypes + eventCount);
         vector<int>    evFloor(floorIndices, floorIndices + eventCount);
+
+        // ── 仿人随机化：逐事件按下时刻微抖动（经典分片路径共用）──
+        // 只抖事件时刻，分片/换手/按压时长全部基于抖动后的时刻推导，整条链路保持一致。
+        if (g_config.randomizeEnabled != 0) {
+            unsigned int rng = (unsigned int)g_config.randomizeSeed;
+            if (rng == 0) {
+                // 种子 0 = 按谱面派生：同一张谱可复现，不同谱互不相同
+                rng = 2166136261u;
+                for (size_t i = 0; i < evTime.size(); i++) {
+                    unsigned long long bits = 0;
+                    memcpy(&bits, &evTime[i], sizeof(double));
+                    rng ^= (unsigned int)(bits ^ (bits >> 32)); rng *= 16777619u;
+                    rng ^= (unsigned int)(evPress[i] + 2);      rng *= 16777619u;
+                }
+                if (rng == 0) rng = 1u;
+            }
+            for (size_t i = 0; i < evTime.size(); i++) {
+                rng = rng * 1664525u + 1013904223u;
+                double f = ((rng >> 8) & 0xFFFF) / 65535.0;          // [0,1)
+                double off = (f - 0.5) * 2.0 * kRandomPressJitter;   // ±6ms
+                evTime[i] += off;
+                if (evTime[i] < 0.0) evTime[i] = 0.0;
+            }
+            // 抖动后不允许时刻倒挂
+            for (size_t i = 1; i < evTime.size(); i++)
+                if (evTime[i] < evTime[i - 1]) evTime[i] = evTime[i - 1];
+        }
+
 
         // ── 时间片划分（创建时间片 + 哨兵片；实现见 BuildPieces）──
         vector<PieceInfo> pieces;
